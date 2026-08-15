@@ -1,0 +1,62 @@
+[
+  {
+    "token_address": "DemoMint1111111111111111111111111111111",
+    "chain": "solana",
+    "timestamp": "2024-01-01T00:00:00+00:00",
+    "price": "1.00",
+    "volume": "1000",
+    "liquidity": "20000",
+    "market_cap": "100000",
+    "buy_count": 10,
+    "sell_count": 5,
+    "source": "fixture"
+  },
+  {
+    "token_address": "DemoMint1111111111111111111111111111111",
+    "chain": "solana",
+    "timestamp": "2024-01-01T00:05:00+00:00",
+    "price": "1.10",
+    "volume": "1200",
+    "liquidity": "21000",
+    "market_cap": "110000",
+    "buy_count": 12,
+    "sell_count": 4,
+    "source": "fixture"
+  },
+  {
+    "token_address": "DemoMint1111111111111111111111111111111",
+    "chain": "solana",
+    "timestamp": "2024-01-01T01:00:00+00:00",
+    "price": "1.25",
+    "volume": "1500",
+    "liquidity": "22000",
+    "market_cap": "125000",
+    "buy_count": 20,
+    "sell_count": 8,
+    "source": "fixture"
+  },
+  {
+    "token_address": "DemoMint1111111111111111111111111111111",
+    "chain": "solana",
+    "timestamp": "2024-01-01T04:00:00+00:00",
+    "price": "1.20",
+    "volume": "1400",
+    "liquidity": "20500",
+    "market_cap": "120000",
+    "buy_count": 18,
+    "sell_count": 10,
+    "source": "fixture"
+  },
+  {
+    "token_address": "DemoMint1111111111111111111111111111111",
+    "chain": "solana",
+    "timestamp": "2024-01-02T00:00:00+00:00",
+    "price": "0.90",
+    "volume": "900",
+    "liquidity": "15000",
+    "market_cap": "90000",
+    "buy_count": 5,
+    "sell_count": 30,
+    "source": "fixture"
+  }
+]

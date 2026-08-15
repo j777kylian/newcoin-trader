@@ -1,0 +1,26 @@
+{
+  "success": true,
+  "data": {
+    "items": [
+      {
+        "type": "pair",
+        "result": [
+          {
+            "address": "PairAddress1111111111111111111111111111111",
+            "name": "MEME/SOL",
+            "symbol": "MEME",
+            "created_at": "2024-01-01T00:00:00Z",
+            "base": {
+              "address": "MemeMint111111111111111111111111111111111",
+              "symbol": "MEME"
+            },
+            "quote": {
+              "address": "So11111111111111111111111111111111111111112",
+              "symbol": "SOL"
+            }
+          }
+        ]
+      }
+    ]
+  }
+}

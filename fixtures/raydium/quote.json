@@ -1,0 +1,15 @@
+{
+  "id": "quote-1",
+  "success": true,
+  "version": "V1",
+  "data": {
+    "swapType": "BaseIn",
+    "inputMint": "So11111111111111111111111111111111111111112",
+    "inputAmount": "1000000000",
+    "outputMint": "MemeMint111111111111111111111111111111111",
+    "outputAmount": "165234567",
+    "otherAmountThreshold": "164408394",
+    "slippageBps": 50,
+    "priceImpactPct": 0.0012
+  }
+}

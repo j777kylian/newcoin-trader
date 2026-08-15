@@ -1,0 +1,11 @@
+[
+  {
+    "id": 28457,
+    "price": "1.10000000",
+    "qty": "2.00000000",
+    "quoteQty": "2.20000000",
+    "time": 1704067260000,
+    "isBuyerMaker": true,
+    "isBestMatch": true
+  }
+]

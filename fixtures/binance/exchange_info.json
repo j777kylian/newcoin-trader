@@ -1,0 +1,22 @@
+{
+  "timezone": "UTC",
+  "serverTime": 1704067200000,
+  "symbols": [
+    {
+      "symbol": "NEWUSDT",
+      "status": "TRADING",
+      "baseAsset": "NEW",
+      "quoteAsset": "USDT",
+      "onboardDate": 1704067200000,
+      "permissions": ["SPOT"]
+    },
+    {
+      "symbol": "OLDUSDT",
+      "status": "BREAK",
+      "baseAsset": "OLD",
+      "quoteAsset": "USDT",
+      "onboardDate": 1600000000000,
+      "permissions": ["SPOT"]
+    }
+  ]
+}
