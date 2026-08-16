@@ -19,7 +19,7 @@ def _as_str_dict(value: Mapping[str, Any] | None) -> dict[str, str]:
     return {str(k): str(v) for k, v in value.items() if v is not None}
 
 
-def _parse_venue(raw: str | None, *, fallback_source: str) -> Venue:
+def parse_venue(raw: str | None, *, fallback_source: str) -> Venue:
     candidate = (raw or fallback_source or "").strip().lower()
     # Sources may be namespaced (binance:aggTrades); take the head token.
     head = candidate.split(":", 1)[0]
@@ -62,7 +62,7 @@ def build_listing_event(
     first_seen = require_utc(first_seen_time)
     created = require_utc(created_time) if created_time is not None else None
     first_md = require_utc(first_market_data_time) if first_market_data_time is not None else None
-    resolved_venue = _parse_venue(venue, fallback_source=source)
+    resolved_venue = parse_venue(venue, fallback_source=source)
     resolved_chain = _parse_chain(chain)
 
     provenance = _as_str_dict(metadata_json)
@@ -104,7 +104,7 @@ def build_market_observation(
     source: str,
     provenance: Mapping[str, Any] | None = None,
 ) -> MarketObservation:
-    resolved_venue = _parse_venue(venue, fallback_source=source)
+    resolved_venue = parse_venue(venue, fallback_source=source)
     prov = _as_str_dict(provenance)
     resolution = resolution_from_provenance(provenance, source=source)
     return MarketObservation(

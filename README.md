@@ -47,7 +47,7 @@ Package layout under `src/newcoin_trader`:
 | `risk` | Notional / size / open / drawdown / liquidity limits |
 | `execution` | Paper broker + fail-closed gateway |
 | `reports` | Reproducible JSON/CSV writers |
-| `cli` | Typer entry point (`smoke-offline`, `collect-once`, `poll`, `ingest-market-history`, `event-study`) |
+| `cli` | Typer entry point (`smoke-offline`, `collect-once`, `poll`, `ingest-market-history`, `event-study`, `feature-research`) |
 
 ## Data flow
 
@@ -277,6 +277,29 @@ newcoin-trader event-study \
 ```
 
 Defaults: entry delays `10s,30s,1m,2m,5m,10m,15m,30m`; holdings `1m,5m,15m,30m,1h,2h,4h,24h`. Sub-minute delays require point/trade resolution and are marked `unsupported_resolution` for minute OHLCV. Outputs: `event_study_summary.json`, `event_study_cells.csv`, `event_study_summary.md`. Empty databases emit a valid zero-sample report.
+
+## Phase 4 feature and strategy research (research only)
+
+Phase 4 builds **point-in-time decision-level features** (age, trailing price/volume/liquidity/volatility where the stored schema supports them, venue/chain/data-product identity) and relates them to Phase 3 **future gross labels**. It is descriptive research only: no executable backtest, paper daemon, broker, live orders, wallets, or ML/RL/LLM.
+
+```bash
+# Requires DATABASE_URL. Bounds are mandatory (no analyze-everything default).
+newcoin-trader feature-research \
+  --venue binance \
+  --start 2024-01-01T00:00:00+00:00 \
+  --end 2024-02-01T00:00:00+00:00 \
+  --max-events 100 \
+  --decision-delay 1m \
+  --windows 1m,5m,15m,30m \
+  --min-sample 20 \
+  --split 0.6,0.2,0.2 \
+  --walk-forward-folds 3 \
+  --max-rules 25 \
+  --max-rule-conditions 2 \
+  --output-dir artifacts/feature_research
+```
+
+Hard invariant: feature inputs are at-or-before `decision_time` (no forward fill). Holder/creator/social/security/wallet families are unsupported. Outputs: `feature_research_summary.json`, `feature_research_records.csv`, `feature_research_summary.md`, plus availability/stats JSON. Empty databases emit a valid zero-sample report with the availability matrix.
 
 ## License
 

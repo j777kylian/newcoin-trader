@@ -28,6 +28,7 @@ def test_root_help_lists_smoke_offline_subcommand() -> None:
     assert "collect-once" in result.output
     assert "poll" in result.output
     assert "event-study" in result.output
+    assert "feature-research" in result.output
 
 
 def test_collect_once_help_is_available() -> None:

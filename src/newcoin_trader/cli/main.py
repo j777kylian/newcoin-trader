@@ -16,12 +16,26 @@ from newcoin_trader.research.event_study_config import (
     MAX_EVENTS_MIN,
     validate_event_study_bounds,
 )
+from newcoin_trader.research.feature_research_config import (
+    DEFAULT_FEATURE_WINDOWS as FR_DEFAULT_WINDOWS,
+)
+from newcoin_trader.research.feature_research_config import (
+    DEFAULT_MAX_RULE_CONDITIONS,
+    DEFAULT_MAX_RULES,
+    DEFAULT_MIN_SAMPLE,
+    DEFAULT_WALK_FORWARD_FOLDS,
+    MAX_RULE_CONDITIONS,
+    parse_duration_list,
+    parse_split_ratios,
+    validate_feature_research_bounds,
+)
 from newcoin_trader.services.event_study import (
     EventStudyService,
     parse_cli_datetime,
     resolve_grid,
     split_duration_option,
 )
+from newcoin_trader.services.feature_research import FeatureResearchService, resolve_decision_delay
 from newcoin_trader.services.ingestion import (
     INGEST_BINANCE_LIMIT_MAX,
     INGEST_CONTROL_MIN,
@@ -297,6 +311,116 @@ def event_study(
                     "event-study complete: "
                     f"run_id={report.meta.run_id} events={report.meta.event_count} "
                     f"cells={len(report.cell_results)} "
+                    f"json={paths['json']} csv={paths['csv']} md={paths['markdown']}"
+                )
+
+    try:
+        asyncio.run(_run())
+    except ConfigError as exc:
+        typer.secho(str(exc), fg=typer.colors.RED, err=True)
+        raise typer.Exit(2) from exc
+    except ValueError as exc:
+        typer.secho(str(exc), fg=typer.colors.RED, err=True)
+        raise typer.Exit(2) from exc
+
+
+@app.command("feature-research")
+def feature_research(
+    venue: str = typer.Option(..., help="Venue filter (required; venues are never pooled)"),
+    start: str = typer.Option(..., help="Inclusive UTC ISO start for listing events"),
+    end: str = typer.Option(..., help="Exclusive UTC ISO end for listing events"),
+    max_events: int = typer.Option(
+        ...,
+        help=f"Hard cap on listing events ({MAX_EVENTS_MIN}–{MAX_EVENTS_MAX}); required",
+    ),
+    output_dir: Path = typer.Option(
+        Path("artifacts/feature_research"),
+        help="Directory for JSON/CSV/Markdown research artifacts",
+    ),
+    decision_delay: str = typer.Option(
+        "1m",
+        help="Decision/entry delay after source_event_time (e.g. 1m, 5m)",
+    ),
+    windows: str | None = typer.Option(
+        None,
+        help="Comma-separated feature windows (allowed: 1m,5m,15m,30m; default all four)",
+    ),
+    min_sample: int = typer.Option(
+        DEFAULT_MIN_SAMPLE,
+        help="Minimum samples for univariate/rule stats",
+    ),
+    split: str = typer.Option(
+        "0.6,0.2,0.2",
+        help="Chronological train,validation,test ratios summing to 1",
+    ),
+    walk_forward_folds: int = typer.Option(
+        DEFAULT_WALK_FORWARD_FOLDS,
+        help="Bounded rolling walk-forward fold count",
+    ),
+    max_rules: int = typer.Option(
+        DEFAULT_MAX_RULES,
+        help="Cap on candidate interpretable rules",
+    ),
+    max_rule_conditions: int = typer.Option(
+        DEFAULT_MAX_RULE_CONDITIONS,
+        help=f"Max conditions per rule (1–{MAX_RULE_CONDITIONS})",
+    ),
+) -> None:
+    """Bounded Phase 4 decision-time feature research (gross labels; not execution).
+
+    Reads existing PostgreSQL token/snapshot/trade rows only. Requires DATABASE_URL.
+    Features use inputs at-or-before decision_time; future labels stay separated.
+    """
+    try:
+        start_dt = parse_cli_datetime(start)
+        end_dt = parse_cli_datetime(end)
+        delay = resolve_decision_delay(decision_delay)
+        window_specs = split_duration_option(windows)
+        window_values = parse_duration_list(window_specs, default=FR_DEFAULT_WINDOWS)
+        split_ratios = parse_split_ratios(split)
+        validate_feature_research_bounds(
+            start=start_dt,
+            end=end_dt,
+            max_events=max_events,
+            decision_delay=delay,
+            windows=window_values,
+            min_sample=min_sample,
+            split_ratios=split_ratios,
+            walk_forward_folds=walk_forward_folds,
+            max_rules=max_rules,
+            max_rule_conditions=max_rule_conditions,
+        )
+        if not venue.strip():
+            raise ConfigError("venue is required")
+    except ConfigError as exc:
+        typer.secho(str(exc), fg=typer.colors.RED, err=True)
+        raise typer.Exit(2) from exc
+    except ValueError as exc:
+        typer.secho(str(exc), fg=typer.colors.RED, err=True)
+        raise typer.Exit(2) from exc
+
+    async def _run() -> None:
+        settings = load_settings()
+        async with open_research_db_stack(settings) as stack:
+            async with stack.session_factory() as session:
+                service = FeatureResearchService(session)
+                report, paths = await service.run(
+                    venue=venue,
+                    start=start_dt,
+                    end=end_dt,
+                    max_events=max_events,
+                    output_dir=output_dir,
+                    decision_delay=delay,
+                    window_specs=window_specs,
+                    min_sample=min_sample,
+                    split_ratios=split_ratios,
+                    walk_forward_folds=walk_forward_folds,
+                    max_rules=max_rules,
+                    max_rule_conditions=max_rule_conditions,
+                )
+                typer.echo(
+                    "feature-research complete: "
+                    f"run_id={report.meta.run_id} records={report.meta.record_count} "
                     f"json={paths['json']} csv={paths['csv']} md={paths['markdown']}"
                 )
 

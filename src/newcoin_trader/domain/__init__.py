@@ -21,6 +21,13 @@ from newcoin_trader.domain.event_study import (
     TokenListingEvent,
 )
 from newcoin_trader.domain.execution import PaperFill, PaperOrder, PortfolioState, RejectedOrder
+from newcoin_trader.domain.feature_research import (
+    AvailabilityLevel,
+    DecisionAvailabilityExclusion,
+    DecisionFeatureRecord,
+    FeatureResearchReport,
+    FeatureValueState,
+)
 from newcoin_trader.domain.market import (
     Kline,
     OrderBookL2,
@@ -35,14 +42,19 @@ from newcoin_trader.domain.strategy import Signal, StrategyContext, StrategyRunR
 from newcoin_trader.domain.tokens import NewListingEvent, TokenRef
 
 __all__ = [
+    "AvailabilityLevel",
     "CandidateWindow",
     "CellAggregate",
     "CellOutcomeStatus",
     "Chain",
+    "DecisionAvailabilityExclusion",
+    "DecisionFeatureRecord",
     "EventStudyCellResult",
     "EventStudyReport",
     "EventStudyRunMeta",
     "ExecMode",
+    "FeatureResearchReport",
+    "FeatureValueState",
     "Kline",
     "ListingAnalysis",
     "MarketObservation",
