@@ -301,6 +301,32 @@ newcoin-trader feature-research \
 
 Hard invariant: feature inputs are at-or-before `decision_time` (no forward fill). Holder/creator/social/security/wallet families are unsupported. Outputs: `feature_research_summary.json`, `feature_research_records.csv`, `feature_research_summary.md`, plus availability/stats JSON. Empty databases emit a valid zero-sample report with the availability matrix.
 
+## Phase 5 executable historical backtest (research simulation only)
+
+Phase 5 evaluates **frozen Phase 4 candidate-rule identities** under venue-specific historical execution constraints. It is a **pure read-only simulator**: no orders, no paper daemon, no wallets, no rediscovery/tuning of Phase 4 rules, and no `PaperBroker` reuse.
+
+```bash
+# Requires DATABASE_URL. Bounds and frozen Phase 4 identity are mandatory.
+newcoin-trader executable-backtest \
+  --venue binance \
+  --start 2024-01-01T00:00:00+00:00 \
+  --end 2024-02-01T00:00:00+00:00 \
+  --max-events 100 \
+  --max-trades 10000 \
+  --max-execution-inputs 250000 \
+  --frozen-rule-id <phase4-rule-id> \
+  --phase4-config-id <phase4-config-id> \
+  --rule-condition age_seconds:gte:0 \
+  --latencies 0s,10s,30s,1m \
+  --holding-periods 1m,5m,15m \
+  --position-notionals 10,100,1000 \
+  --max-participation 0.10 \
+  --phase4-records-json artifacts/feature_research/feature_research_summary.json \
+  --output-dir artifacts/executable_backtest
+```
+
+**Capability honesty:** the stored database has **no historical depth table**. Binance/CEX depth walking runs only against **supplied** historical L2 input; otherwise fills use timestamped price/liquidity/trade data with explicit `modeled_*` confidence. Raydium/Gecko use deterministic **modeled liquidity-participation impact** (never labeled AMM-exact). Fees are venue-configured assumed bps when historical fees are unavailable; fee/spread/slippage/impact are reported separately. Sub-minute latency requires point/trade resolution (`unsupported_resolution` otherwise). Pass `--phase4-records-json` to supply frozen Phase 4 decision records (Phase 5 never rediscovers rules). Outputs: `executable_backtest_summary.json`, `executable_backtest_trades.csv`, `executable_backtest_summary.md`, `executable_backtest_capabilities.json`.
+
 ## License
 
 Research MVP. Use at your own risk. No warranty.

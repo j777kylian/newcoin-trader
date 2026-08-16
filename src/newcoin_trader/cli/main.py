@@ -9,12 +9,40 @@ import typer
 
 from newcoin_trader.config import load_settings
 from newcoin_trader.demo import run_offline_smoke
+from newcoin_trader.domain.executable_backtest import FrozenCandidateIdentity
+from newcoin_trader.domain.feature_research import RuleCondition
+from newcoin_trader.domain.numeric import require_finite_decimal
 from newcoin_trader.errors import ConfigError
 from newcoin_trader.logging_setup import configure_logging
 from newcoin_trader.research.event_study_config import (
     MAX_EVENTS_MAX,
     MAX_EVENTS_MIN,
     validate_event_study_bounds,
+)
+from newcoin_trader.research.executable_backtest_config import (
+    DEFAULT_HOLDING_PERIODS as EB_DEFAULT_HOLDINGS,
+)
+from newcoin_trader.research.executable_backtest_config import (
+    DEFAULT_LATENCIES as EB_DEFAULT_LATENCIES,
+)
+from newcoin_trader.research.executable_backtest_config import (
+    DEFAULT_MAX_PARTICIPATION,
+    assumed_fee_for_venue,
+    parse_decimal_list,
+    parse_latency_list,
+    validate_executable_backtest_bounds,
+)
+from newcoin_trader.research.executable_backtest_config import (
+    DEFAULT_POSITION_NOTIONALS as EB_DEFAULT_POSITIONS,
+)
+from newcoin_trader.research.executable_backtest_config import (
+    MAX_EVENTS_MAX as EB_MAX_EVENTS_MAX,
+)
+from newcoin_trader.research.executable_backtest_config import (
+    MAX_EVENTS_MIN as EB_MAX_EVENTS_MIN,
+)
+from newcoin_trader.research.executable_backtest_config import (
+    parse_duration_list as parse_eb_duration_list,
 )
 from newcoin_trader.research.feature_research_config import (
     DEFAULT_FEATURE_WINDOWS as FR_DEFAULT_WINDOWS,
@@ -34,6 +62,10 @@ from newcoin_trader.services.event_study import (
     parse_cli_datetime,
     resolve_grid,
     split_duration_option,
+)
+from newcoin_trader.services.executable_backtest import (
+    ExecutableBacktestService,
+    load_phase4_decision_records,
 )
 from newcoin_trader.services.feature_research import FeatureResearchService, resolve_decision_delay
 from newcoin_trader.services.ingestion import (
@@ -421,6 +453,173 @@ def feature_research(
                 typer.echo(
                     "feature-research complete: "
                     f"run_id={report.meta.run_id} records={report.meta.record_count} "
+                    f"json={paths['json']} csv={paths['csv']} md={paths['markdown']}"
+                )
+
+    try:
+        asyncio.run(_run())
+    except ConfigError as exc:
+        typer.secho(str(exc), fg=typer.colors.RED, err=True)
+        raise typer.Exit(2) from exc
+    except ValueError as exc:
+        typer.secho(str(exc), fg=typer.colors.RED, err=True)
+        raise typer.Exit(2) from exc
+
+
+def _parse_rule_condition(spec: str) -> RuleCondition:
+    parts = [p.strip() for p in spec.split(":")]
+    if len(parts) != 3:
+        raise ConfigError("rule condition must be feature:op:threshold (e.g. age_seconds:gte:0)")
+    feature_name, op, threshold = parts
+    if op not in {"gt", "gte", "lt", "lte", "eq"}:
+        raise ConfigError(f"unsupported rule condition op: {op!r}")
+    return RuleCondition(
+        feature_name=feature_name,
+        op=op,
+        threshold=require_finite_decimal(threshold, name="rule_threshold"),
+    )
+
+
+@app.command("executable-backtest")
+def executable_backtest(
+    venue: str = typer.Option(..., help="Venue filter (required; venues are never pooled)"),
+    start: str = typer.Option(..., help="Inclusive UTC ISO start for listing events"),
+    end: str = typer.Option(..., help="Exclusive UTC ISO end for listing events"),
+    max_events: int = typer.Option(
+        ...,
+        help=f"Hard cap on listing events ({EB_MAX_EVENTS_MIN}–{EB_MAX_EVENTS_MAX}); required",
+    ),
+    max_trades: int = typer.Option(
+        ...,
+        help="Hard cap on historical trade rows read for execution; required",
+    ),
+    max_execution_inputs: int = typer.Option(
+        ...,
+        help="Hard cap on price/liquidity observations read for execution; required",
+    ),
+    output_dir: Path = typer.Option(
+        ...,
+        help="Directory for JSON/CSV/Markdown executable-backtest artifacts; required",
+    ),
+    frozen_rule_id: str = typer.Option(
+        ...,
+        help="Frozen Phase 4 candidate rule_id (required; no rediscovery)",
+    ),
+    phase4_config_id: str = typer.Option(
+        ...,
+        help="Frozen Phase 4 config_id provenance (required)",
+    ),
+    rule_condition: list[str] | None = typer.Option(
+        None,
+        help="Frozen rule condition feature:op:threshold (repeatable; default age_seconds:gte:0)",
+    ),
+    split_label: str = typer.Option("test", help="Frozen split label provenance"),
+    fold_index: int | None = typer.Option(None, help="Optional frozen walk-forward fold index"),
+    latencies: str | None = typer.Option(
+        None,
+        help="Comma-separated entry fill latencies (default: 0s,10s,30s,1m); 0s allowed",
+    ),
+    holding_periods: str | None = typer.Option(
+        None,
+        help="Comma-separated holdings (default: 1m,5m,15m)",
+    ),
+    position_notionals: str | None = typer.Option(
+        None,
+        help="Comma-separated position notionals (default: 10,100,1000)",
+    ),
+    max_participation: str = typer.Option(
+        str(DEFAULT_MAX_PARTICIPATION),
+        help="Max fraction of observed liquidity per fill",
+    ),
+    assumed_fee_bps: str | None = typer.Option(
+        None,
+        help="Assumed venue fee in bps when historical fees unavailable",
+    ),
+    phase4_records_json: Path | None = typer.Option(
+        None,
+        help="Optional Phase 4 feature_research_summary.json with frozen decision records",
+    ),
+) -> None:
+    """Bounded Phase 5 historical executable backtest (research simulation only).
+
+    Reads existing PostgreSQL token/snapshot/trade rows only. Never sends orders,
+    never rediscovers Phase 4 rules, and never claims AMM-exact or live-book fills.
+    Requires DATABASE_URL. Historical depth is not persisted — modeled fallback used.
+    """
+    try:
+        start_dt = parse_cli_datetime(start)
+        end_dt = parse_cli_datetime(end)
+        latency_specs = split_duration_option(latencies)
+        holding_specs = split_duration_option(holding_periods)
+        latency_values = parse_latency_list(latency_specs, default=EB_DEFAULT_LATENCIES)
+        holding_values = parse_eb_duration_list(holding_specs, default=EB_DEFAULT_HOLDINGS)
+        notionals = parse_decimal_list(position_notionals, default=EB_DEFAULT_POSITIONS)
+        participation = require_finite_decimal(max_participation, name="max_participation")
+        fee_override = (
+            require_finite_decimal(assumed_fee_bps, name="assumed_fee_bps") if assumed_fee_bps is not None else None
+        )
+        fee = assumed_fee_for_venue(venue, fee_override)
+        cond_specs = rule_condition if rule_condition else ["age_seconds:gte:0"]
+        conditions = tuple(_parse_rule_condition(spec) for spec in cond_specs)
+        if not frozen_rule_id.strip() or not phase4_config_id.strip():
+            raise ConfigError("frozen Phase 4 rule identity is required (no rediscovery)")
+        identity = FrozenCandidateIdentity(
+            rule_id=frozen_rule_id.strip(),
+            conditions=conditions,
+            human_readable=" AND ".join(f"{c.feature_name} {c.op} {c.threshold}" for c in conditions),
+            phase4_config_id=phase4_config_id.strip(),
+            split_label=split_label,
+            fold_index=fold_index,
+            provenance={"source": "cli_frozen_phase4"},
+        )
+        validate_executable_backtest_bounds(
+            start=start_dt,
+            end=end_dt,
+            max_events=max_events,
+            max_trades=max_trades,
+            max_execution_inputs=max_execution_inputs,
+            latencies=latency_values,
+            holding_periods=holding_values,
+            position_notionals=notionals,
+            max_participation=participation,
+            assumed_fee_bps=fee,
+        )
+        if not venue.strip():
+            raise ConfigError("venue is required")
+        decision_records = (
+            load_phase4_decision_records(phase4_records_json) if phase4_records_json is not None else None
+        )
+    except ConfigError as exc:
+        typer.secho(str(exc), fg=typer.colors.RED, err=True)
+        raise typer.Exit(2) from exc
+    except ValueError as exc:
+        typer.secho(str(exc), fg=typer.colors.RED, err=True)
+        raise typer.Exit(2) from exc
+
+    async def _run() -> None:
+        settings = load_settings()
+        async with open_research_db_stack(settings) as stack:
+            async with stack.session_factory() as session:
+                service = ExecutableBacktestService(session)
+                report, paths = await service.run(
+                    venue=venue,
+                    start=start_dt,
+                    end=end_dt,
+                    max_events=max_events,
+                    max_trades=max_trades,
+                    max_execution_inputs=max_execution_inputs,
+                    output_dir=output_dir,
+                    frozen_rules=(identity,),
+                    latency_specs=latency_specs,
+                    holding_specs=holding_specs,
+                    position_notionals=notionals,
+                    max_participation=participation,
+                    assumed_fee_bps=fee,
+                    decision_records=decision_records,
+                )
+                typer.echo(
+                    "executable-backtest complete: "
+                    f"run_id={report.meta.run_id} trades={report.meta.trade_count} "
                     f"json={paths['json']} csv={paths['csv']} md={paths['markdown']}"
                 )
 

@@ -20,6 +20,11 @@ from newcoin_trader.domain.event_study import (
     PathStats,
     TokenListingEvent,
 )
+from newcoin_trader.domain.executable_backtest import (
+    ExecutableBacktestReport,
+    ExecutableBacktestStatus,
+    FrozenCandidateIdentity,
+)
 from newcoin_trader.domain.execution import PaperFill, PaperOrder, PortfolioState, RejectedOrder
 from newcoin_trader.domain.feature_research import (
     AvailabilityLevel,
@@ -52,9 +57,12 @@ __all__ = [
     "EventStudyCellResult",
     "EventStudyReport",
     "EventStudyRunMeta",
+    "ExecutableBacktestReport",
+    "ExecutableBacktestStatus",
     "ExecMode",
     "FeatureResearchReport",
     "FeatureValueState",
+    "FrozenCandidateIdentity",
     "Kline",
     "ListingAnalysis",
     "MarketObservation",
