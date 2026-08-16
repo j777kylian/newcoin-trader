@@ -11,6 +11,10 @@ class ConfigError(NewcoinError):
     """Invalid or unsafe configuration."""
 
 
+class ResearchError(NewcoinError):
+    """Deterministic research/computation failure (finite inputs, unsafe context)."""
+
+
 class CollectorError(NewcoinError):
     """Market-data collector failure."""
 

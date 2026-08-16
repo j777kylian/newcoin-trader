@@ -9,6 +9,17 @@ from newcoin_trader.domain.enums import (
     SignalKind,
     Venue,
 )
+from newcoin_trader.domain.event_study import (
+    CellAggregate,
+    CellOutcomeStatus,
+    EventStudyCellResult,
+    EventStudyReport,
+    EventStudyRunMeta,
+    MarketObservation,
+    ObservationResolution,
+    PathStats,
+    TokenListingEvent,
+)
 from newcoin_trader.domain.execution import PaperFill, PaperOrder, PortfolioState, RejectedOrder
 from newcoin_trader.domain.market import (
     Kline,
@@ -25,15 +36,23 @@ from newcoin_trader.domain.tokens import NewListingEvent, TokenRef
 
 __all__ = [
     "CandidateWindow",
+    "CellAggregate",
+    "CellOutcomeStatus",
     "Chain",
+    "EventStudyCellResult",
+    "EventStudyReport",
+    "EventStudyRunMeta",
     "ExecMode",
     "Kline",
     "ListingAnalysis",
+    "MarketObservation",
     "NewListingEvent",
+    "ObservationResolution",
     "OrderBookL2",
     "PaperFill",
     "PaperOrder",
     "PaperStatus",
+    "PathStats",
     "PoolQuote",
     "PoolSnapshot",
     "PortfolioState",
@@ -46,6 +65,7 @@ __all__ = [
     "StrategyContext",
     "StrategyRunResult",
     "Ticker24h",
+    "TokenListingEvent",
     "TokenRef",
     "TradeTick",
     "Venue",

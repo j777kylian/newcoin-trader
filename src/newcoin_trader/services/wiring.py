@@ -29,6 +29,27 @@ class LiveIngestionStack:
     session_factory: async_sessionmaker[AsyncSession]
 
 
+@dataclass
+class ResearchDbStack:
+    """DATABASE_URL research reads only — no HTTP collectors."""
+
+    settings: Settings
+    engine: AsyncEngine
+    session_factory: async_sessionmaker[AsyncSession]
+
+
+@asynccontextmanager
+async def open_research_db_stack(settings: Settings) -> AsyncIterator[ResearchDbStack]:
+    """Open async Postgres for bounded research queries (no network collectors)."""
+    engine = create_engine(settings.database_url)
+    factory = create_session_factory(engine)
+    stack = ResearchDbStack(settings=settings, engine=engine, session_factory=factory)
+    try:
+        yield stack
+    finally:
+        await engine.dispose()
+
+
 def require_birdeye_api_key(settings: Settings) -> str:
     key = settings.birdeye_api_key.strip()
     if not key:

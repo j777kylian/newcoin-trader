@@ -47,7 +47,7 @@ Package layout under `src/newcoin_trader`:
 | `risk` | Notional / size / open / drawdown / liquidity limits |
 | `execution` | Paper broker + fail-closed gateway |
 | `reports` | Reproducible JSON/CSV writers |
-| `cli` | Typer entry point (`smoke-offline`, `collect-once`, `poll`, `ingest-market-history`) |
+| `cli` | Typer entry point (`smoke-offline`, `collect-once`, `poll`, `ingest-market-history`, `event-study`) |
 
 ## Data flow
 
@@ -261,6 +261,22 @@ All Phase 1/2 collectors are public, read-only, and structurally GET-only.
 | **Birdeye** | Solana new-token/new-pair discovery | `BIRDEYE_API_KEY` required only for live discovery. `BIRDEYE_BASE_URL` and `BIRDEYE_CHAIN` optional. |
 
 Candidate entry/exit windows are deterministic research labels on historical returns. They are **not** investment or trading advice.
+
+## Phase 3 descriptive event-study (research only)
+
+Phase 3 answers **future gross market-return distributions** by `venue × entry_delay × holding_period` from existing PostgreSQL token/price snapshot rows. It is **descriptive research**, not strategy optimization and not executable PnL.
+
+```bash
+# Requires DATABASE_URL. Bounds are mandatory (no analyze-everything default).
+newcoin-trader event-study \
+  --venue binance \
+  --start 2024-01-01T00:00:00+00:00 \
+  --end 2024-02-01T00:00:00+00:00 \
+  --max-events 100 \
+  --output-dir artifacts/event_study
+```
+
+Defaults: entry delays `10s,30s,1m,2m,5m,10m,15m,30m`; holdings `1m,5m,15m,30m,1h,2h,4h,24h`. Sub-minute delays require point/trade resolution and are marked `unsupported_resolution` for minute OHLCV. Outputs: `event_study_summary.json`, `event_study_cells.csv`, `event_study_summary.md`. Empty databases emit a valid zero-sample report.
 
 ## License
 

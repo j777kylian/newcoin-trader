@@ -11,6 +11,17 @@ from newcoin_trader.config import load_settings
 from newcoin_trader.demo import run_offline_smoke
 from newcoin_trader.errors import ConfigError
 from newcoin_trader.logging_setup import configure_logging
+from newcoin_trader.research.event_study_config import (
+    MAX_EVENTS_MAX,
+    MAX_EVENTS_MIN,
+    validate_event_study_bounds,
+)
+from newcoin_trader.services.event_study import (
+    EventStudyService,
+    parse_cli_datetime,
+    resolve_grid,
+    split_duration_option,
+)
 from newcoin_trader.services.ingestion import (
     INGEST_BINANCE_LIMIT_MAX,
     INGEST_CONTROL_MIN,
@@ -25,6 +36,7 @@ from newcoin_trader.services.wiring import (
     build_ingestion_service,
     build_market_history_service,
     open_live_stack,
+    open_research_db_stack,
 )
 
 app = typer.Typer(
@@ -216,6 +228,86 @@ def poll(
     except KeyboardInterrupt:
         typer.echo("poll stopped")
         raise typer.Exit(0) from None
+
+
+@app.command("event-study")
+def event_study(
+    venue: str = typer.Option(..., help="Venue filter (required; venues are never pooled)"),
+    start: str = typer.Option(..., help="Inclusive UTC ISO start for listing events"),
+    end: str = typer.Option(..., help="Exclusive UTC ISO end for listing events"),
+    max_events: int = typer.Option(
+        ...,
+        help=f"Hard cap on listing events ({MAX_EVENTS_MIN}–{MAX_EVENTS_MAX}); required",
+    ),
+    output_dir: Path = typer.Option(
+        Path("artifacts/event_study"),
+        help="Directory for JSON/CSV/Markdown research artifacts",
+    ),
+    entry_delays: str | None = typer.Option(
+        None,
+        help="Comma-separated entry delays (default: 10s,30s,1m,2m,5m,10m,15m,30m)",
+    ),
+    holding_periods: str | None = typer.Option(
+        None,
+        help="Comma-separated holdings (default: 1m,5m,15m,30m,1h,2h,4h,24h)",
+    ),
+) -> None:
+    """Bounded descriptive Phase 3 event-study (gross market returns; not PnL).
+
+    Reads existing PostgreSQL token/snapshot rows only. Requires DATABASE_URL.
+    Empty databases emit a valid zero-sample report rather than failing.
+    """
+    try:
+        start_dt = parse_cli_datetime(start)
+        end_dt = parse_cli_datetime(end)
+        delay_specs = split_duration_option(entry_delays)
+        holding_specs = split_duration_option(holding_periods)
+        entry_delay_values, holding_values = resolve_grid(delay_specs, holding_specs)
+        validate_event_study_bounds(
+            start=start_dt,
+            end=end_dt,
+            max_events=max_events,
+            entry_delays=entry_delay_values,
+            holding_periods=holding_values,
+        )
+        if not venue.strip():
+            raise ConfigError("venue is required")
+    except ConfigError as exc:
+        typer.secho(str(exc), fg=typer.colors.RED, err=True)
+        raise typer.Exit(2) from exc
+    except ValueError as exc:
+        typer.secho(str(exc), fg=typer.colors.RED, err=True)
+        raise typer.Exit(2) from exc
+
+    async def _run() -> None:
+        settings = load_settings()
+        async with open_research_db_stack(settings) as stack:
+            async with stack.session_factory() as session:
+                service = EventStudyService(session)
+                report, paths = await service.run(
+                    venue=venue,
+                    start=start_dt,
+                    end=end_dt,
+                    max_events=max_events,
+                    output_dir=output_dir,
+                    entry_delay_specs=delay_specs,
+                    holding_period_specs=holding_specs,
+                )
+                typer.echo(
+                    "event-study complete: "
+                    f"run_id={report.meta.run_id} events={report.meta.event_count} "
+                    f"cells={len(report.cell_results)} "
+                    f"json={paths['json']} csv={paths['csv']} md={paths['markdown']}"
+                )
+
+    try:
+        asyncio.run(_run())
+    except ConfigError as exc:
+        typer.secho(str(exc), fg=typer.colors.RED, err=True)
+        raise typer.Exit(2) from exc
+    except ValueError as exc:
+        typer.secho(str(exc), fg=typer.colors.RED, err=True)
+        raise typer.Exit(2) from exc
 
 
 def main() -> None:
