@@ -86,3 +86,11 @@ def test_snapshot_idempotency_key_is_stable() -> None:
 
 def test_decimal_column_python_type() -> None:
     assert PriceSnapshot.__table__.c.volume.type.as_generic().python_type is Decimal  # type: ignore[union-attr]
+
+
+def test_live_paper_session_tables_have_idempotency_keys() -> None:
+    from newcoin_trader.database.models import LivePaperPosition, LivePaperSession, LivePaperSignal
+
+    assert "uq_live_paper_sessions_session_id" in _constraint_names(LivePaperSession.__table__)
+    assert "uq_live_paper_signals_session_signal" in _constraint_names(LivePaperSignal.__table__)
+    assert "uq_live_paper_positions_session_position" in _constraint_names(LivePaperPosition.__table__)

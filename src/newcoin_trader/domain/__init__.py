@@ -33,6 +33,7 @@ from newcoin_trader.domain.feature_research import (
     FeatureResearchReport,
     FeatureValueState,
 )
+from newcoin_trader.domain.live_paper import LivePaperReport, LivePaperStatus, PositionLifecycle
 from newcoin_trader.domain.market import (
     Kline,
     OrderBookL2,
@@ -65,6 +66,8 @@ __all__ = [
     "FrozenCandidateIdentity",
     "Kline",
     "ListingAnalysis",
+    "LivePaperReport",
+    "LivePaperStatus",
     "MarketObservation",
     "NewListingEvent",
     "ObservationResolution",
@@ -76,6 +79,7 @@ __all__ = [
     "PoolQuote",
     "PoolSnapshot",
     "PortfolioState",
+    "PositionLifecycle",
     "PriceSnapshot",
     "RejectedOrder",
     "RejectReason",

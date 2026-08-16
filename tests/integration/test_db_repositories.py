@@ -168,3 +168,190 @@ async def test_paper_and_strategy_insert_are_idempotent(session: AsyncSession) -
     assert saved_a.id == saved_b.id
     assert null_a.id == null_b.id
     assert saved_a.strategy_name == "listing_momentum"
+
+
+@pytest.mark.asyncio
+async def test_live_paper_repository_three_run_durable_idempotency(session: AsyncSession) -> None:
+    """PG-backed Run1/Run2/Run3: empty current report must not wipe seen IDs."""
+    import tempfile
+    from datetime import timedelta
+    from pathlib import Path
+
+    from newcoin_trader.database.repositories.live_paper import LivePaperRepository
+    from newcoin_trader.domain.enums import Chain, Side, Venue
+    from newcoin_trader.domain.event_study import ObservationResolution, TokenListingEvent
+    from newcoin_trader.domain.executable_backtest import (
+        DepthLevel,
+        FrozenCandidateIdentity,
+        HistoricalDepthBook,
+    )
+    from newcoin_trader.domain.feature_research import RuleCondition
+    from newcoin_trader.domain.live_paper import LivePaperStatus, ReplayMarketEvent
+    from newcoin_trader.research.live_paper_engine import process_live_paper_session
+    from newcoin_trader.services.live_paper import LivePaperService
+
+    t0 = datetime(2024, 1, 1, 12, 0, 0, tzinfo=UTC)
+
+    def listing() -> TokenListingEvent:
+        return TokenListingEvent(
+            event_id="e1",
+            venue=Venue.BINANCE,
+            chain=Chain.BINANCE,
+            token_address="TOKEN",
+            pair_address="PAIR",
+            symbol="TOK",
+            source="binance",
+            source_event_time=t0,
+            first_seen_time=t0,
+            first_market_data_time=t0,
+            decision_available_time=t0,
+            provenance={"token_id": "1"},
+        )
+
+    def listing_event(item: TokenListingEvent) -> ReplayMarketEvent:
+        return ReplayMarketEvent(
+            event_id=item.event_id,
+            kind="listing",
+            venue=item.venue,
+            token_address=item.token_address,
+            chain=item.chain.value,
+            source_timestamp=item.source_event_time,
+            received_timestamp=item.source_event_time,
+            source=item.source,
+            listing=item,
+            provenance=dict(item.provenance),
+        )
+
+    def market(*, ts: datetime, price: str, depth: HistoricalDepthBook | None = None) -> ReplayMarketEvent:
+        return ReplayMarketEvent(
+            event_id="e1",
+            kind="market",
+            venue=Venue.BINANCE,
+            token_address="TOKEN",
+            chain="binance",
+            source_timestamp=ts,
+            received_timestamp=ts,
+            price=Decimal(price),
+            liquidity=Decimal("100000"),
+            volume=Decimal("1000"),
+            resolution=ObservationResolution.POINT,
+            source="binance:trade",
+            depth=depth,
+            provenance={"kind": "trade"},
+        )
+
+    decision = t0 + timedelta(minutes=1)
+    exit_ts = decision + timedelta(minutes=5)
+    lst = listing()
+    events = [
+        listing_event(lst),
+        market(ts=decision, price="10"),
+        market(ts=exit_ts, price="12"),
+    ]
+    identity = FrozenCandidateIdentity(
+        rule_id="frozen-rule-1",
+        conditions=(RuleCondition(feature_name="age_source_event_seconds", op="gte", threshold=Decimal("0")),),
+        human_readable="age_source_event_seconds gte 0",
+        phase4_config_id="cfg-phase4",
+        split_label="test",
+        fold_index=0,
+        provenance={"source": "frozen_phase4"},
+    )
+    repo = LivePaperRepository(session)
+    service = LivePaperService(session=session)
+
+    with tempfile.TemporaryDirectory() as tmp:
+        out = Path(tmp)
+        kwargs = dict(
+            events=events,
+            identity=identity,
+            venue="binance",
+            duration=timedelta(hours=1),
+            max_events=50,
+            max_signals=20,
+            max_trades=20,
+            queue_capacity=100,
+            starting_cash=Decimal("10000"),
+            session_start=t0,
+            position_notional=Decimal("100"),
+            holding_period=timedelta(minutes=5),
+        )
+        r1, _ = await service.run_replay(**kwargs, output_dir=out / "r1")
+        await session.commit()
+        state1 = await repo.load_session_state(
+            venue=Venue.BINANCE.value,
+            rule_id=identity.rule_id,
+            phase4_config_id=identity.phase4_config_id,
+            session_start=t0,
+        )
+        assert state1.get("seen_signals")
+        assert state1.get("seen_fills")
+        pnl1 = r1.portfolio.realized_pnl
+
+        r2, _ = await service.run_replay(**kwargs, output_dir=out / "r2")
+        await session.commit()
+        state2 = await repo.load_session_state(
+            venue=Venue.BINANCE.value,
+            rule_id=identity.rule_id,
+            phase4_config_id=identity.phase4_config_id,
+            session_start=t0,
+        )
+        assert set(state2.get("seen_signals", [])) >= set(state1.get("seen_signals", []))
+        assert set(state2.get("seen_fills", [])) >= set(state1.get("seen_fills", []))
+        assert r2.portfolio.realized_pnl == pnl1
+
+        r3, _ = await service.run_replay(**kwargs, output_dir=out / "r3")
+        await session.commit()
+        state3 = await repo.load_session_state(
+            venue=Venue.BINANCE.value,
+            rule_id=identity.rule_id,
+            phase4_config_id=identity.phase4_config_id,
+            session_start=t0,
+        )
+        assert set(state3.get("seen_signals", [])) >= set(state2.get("seen_signals", []))
+        assert r3.portfolio.realized_pnl == pnl1
+        assert len([s for s in r3.signals if s.status is LivePaperStatus.SIGNAL_ACCEPTED]) == 0
+
+    book_entry = HistoricalDepthBook(
+        token_address="TOKEN",
+        chain="binance",
+        venue=Venue.BINANCE,
+        timestamp=decision,
+        bids=(DepthLevel(price=Decimal("9.9"), quantity=Decimal("100")),),
+        asks=(DepthLevel(price=Decimal("10"), quantity=Decimal("10")),),
+        source="binance:depth",
+    )
+    book_partial = HistoricalDepthBook(
+        token_address="TOKEN",
+        chain="binance",
+        venue=Venue.BINANCE,
+        timestamp=exit_ts,
+        bids=(DepthLevel(price=Decimal("11"), quantity=Decimal("5")),),
+        asks=(DepthLevel(price=Decimal("11.1"), quantity=Decimal("100")),),
+        source="binance:depth",
+    )
+    partial_report = process_live_paper_session(
+        events=[
+            listing_event(lst),
+            market(ts=decision, price="10", depth=book_entry),
+            market(ts=exit_ts, price="11", depth=book_partial),
+        ],
+        venue=Venue.BINANCE,
+        session_start=t0,
+        duration=timedelta(hours=1),
+        max_events=50,
+        max_signals=20,
+        max_trades=20,
+        queue_capacity=100,
+        starting_cash=Decimal("10000"),
+        position_notional=Decimal("100"),
+        holding_period=timedelta(minutes=5),
+        identity=identity,
+        max_token_exposure=Decimal("5000"),
+    )
+    await repo.persist_report(partial_report)
+    await session.commit()
+    assert partial_report.positions
+    assert partial_report.positions[-1].remaining_qty is not None
+    assert partial_report.positions[-1].remaining_qty > 0
+    assert any(f.side is Side.SELL for f in partial_report.fills)

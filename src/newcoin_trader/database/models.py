@@ -206,3 +206,89 @@ class PaperTrade(Base):
         nullable=False,
         server_default=func.now(),
     )
+
+
+class LivePaperSession(Base):
+    """Durable Phase 6 paper session identity (no real financial account)."""
+
+    __tablename__ = "live_paper_sessions"
+    __table_args__ = (
+        UniqueConstraint("session_id", name="uq_live_paper_sessions_session_id"),
+        Index("ix_live_paper_sessions_venue_start", "venue", "session_start"),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    session_id: Mapped[str] = mapped_column(Text, nullable=False)
+    config_id: Mapped[str] = mapped_column(Text, nullable=False)
+    venue: Mapped[str] = mapped_column(Text, nullable=False)
+    session_start: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    session_end: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    frozen_rule_id: Mapped[str] = mapped_column(Text, nullable=False)
+    phase4_config_id: Mapped[str] = mapped_column(Text, nullable=False)
+    starting_cash: Mapped[Decimal] = mapped_column(NUMERIC, nullable=False)
+    realized_pnl: Mapped[Decimal] = mapped_column(NUMERIC, nullable=False, server_default=text("0"))
+    halted: Mapped[str] = mapped_column(Text, nullable=False, server_default=text("'false'"))
+    state_json: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+    )
+
+
+class LivePaperSignal(Base):
+    """Idempotent Phase 6 paper signal / rejection row."""
+
+    __tablename__ = "live_paper_signals"
+    __table_args__ = (
+        UniqueConstraint("session_id", "signal_id", name="uq_live_paper_signals_session_signal"),
+        Index("ix_live_paper_signals_session_id", "session_id"),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    session_id: Mapped[str] = mapped_column(Text, nullable=False)
+    signal_id: Mapped[str] = mapped_column(Text, nullable=False)
+    event_id: Mapped[str] = mapped_column(Text, nullable=False)
+    rule_id: Mapped[str] = mapped_column(Text, nullable=False)
+    decision_time: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    status: Mapped[str] = mapped_column(Text, nullable=False)
+    reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    provenance_json: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+    )
+
+
+class LivePaperPosition(Base):
+    """Idempotent Phase 6 paper position lifecycle transitions."""
+
+    __tablename__ = "live_paper_positions"
+    __table_args__ = (
+        UniqueConstraint("session_id", "position_id", name="uq_live_paper_positions_session_position"),
+        Index("ix_live_paper_positions_session_id", "session_id"),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    session_id: Mapped[str] = mapped_column(Text, nullable=False)
+    position_id: Mapped[str] = mapped_column(Text, nullable=False)
+    signal_id: Mapped[str] = mapped_column(Text, nullable=False)
+    event_id: Mapped[str] = mapped_column(Text, nullable=False)
+    token_address: Mapped[str] = mapped_column(Text, nullable=False)
+    venue: Mapped[str] = mapped_column(Text, nullable=False)
+    lifecycle: Mapped[str] = mapped_column(Text, nullable=False)
+    entry_notional: Mapped[Decimal] = mapped_column(NUMERIC, nullable=False)
+    entry_qty: Mapped[Decimal] = mapped_column(NUMERIC, nullable=False)
+    entry_price: Mapped[Decimal] = mapped_column(NUMERIC, nullable=False)
+    exit_qty: Mapped[Decimal | None] = mapped_column(NUMERIC, nullable=True)
+    exit_price: Mapped[Decimal | None] = mapped_column(NUMERIC, nullable=True)
+    realized_pnl: Mapped[Decimal | None] = mapped_column(NUMERIC, nullable=True)
+    entry_time: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    exit_time: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    meta_json: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+    )

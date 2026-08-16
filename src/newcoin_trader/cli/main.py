@@ -57,6 +57,11 @@ from newcoin_trader.research.feature_research_config import (
     parse_split_ratios,
     validate_feature_research_bounds,
 )
+from newcoin_trader.research.live_paper_config import (
+    DEFAULT_POSITION_NOTIONAL as LP_DEFAULT_NOTIONAL,
+)
+from newcoin_trader.research.live_paper_config import parse_duration as parse_lp_duration
+from newcoin_trader.research.live_paper_config import validate_live_paper_bounds
 from newcoin_trader.services.event_study import (
     EventStudyService,
     parse_cli_datetime,
@@ -78,6 +83,7 @@ from newcoin_trader.services.ingestion import (
     PollController,
     validate_ingest_market_history_controls,
 )
+from newcoin_trader.services.live_paper import LivePaperService, load_replay_events
 from newcoin_trader.services.wiring import (
     build_ingestion_service,
     build_market_history_service,
@@ -622,6 +628,113 @@ def executable_backtest(
                     f"run_id={report.meta.run_id} trades={report.meta.trade_count} "
                     f"json={paths['json']} csv={paths['csv']} md={paths['markdown']}"
                 )
+
+    try:
+        asyncio.run(_run())
+    except ConfigError as exc:
+        typer.secho(str(exc), fg=typer.colors.RED, err=True)
+        raise typer.Exit(2) from exc
+    except ValueError as exc:
+        typer.secho(str(exc), fg=typer.colors.RED, err=True)
+        raise typer.Exit(2) from exc
+
+
+@app.command("live-paper")
+def live_paper(
+    venue: str = typer.Option(..., help="Venue filter (required; venues are never pooled)"),
+    duration: str = typer.Option(..., help="Bounded session duration (e.g. 1h); required, no indefinite daemon"),
+    max_events: int = typer.Option(..., help="Hard cap on replay/feed events; required"),
+    max_signals: int = typer.Option(..., help="Hard cap on accepted paper signals; required"),
+    max_trades: int = typer.Option(
+        ...,
+        help="Hard cap on paper positions/round-trips (not fills); required",
+    ),
+    queue_capacity: int = typer.Option(..., help="Bounded in-memory event queue capacity; required"),
+    frozen_rule_id: str = typer.Option(..., help="Frozen Phase 4 candidate rule_id (required)"),
+    phase4_config_id: str = typer.Option(..., help="Frozen Phase 4 config_id provenance (required)"),
+    paper_starting_cash: str = typer.Option(..., help="Paper starting cash (required; not real capital)"),
+    output_dir: Path = typer.Option(..., help="Directory for JSON/CSV/Markdown live-paper artifacts; required"),
+    replay_path: Path = typer.Option(..., help="Offline replay JSON with timestamped events; required for this pass"),
+    session_start: str = typer.Option(..., help="UTC ISO session start clock"),
+    rule_condition: list[str] | None = typer.Option(
+        None,
+        help="Frozen rule condition feature:op:threshold (repeatable; default age_source_event_seconds:gte:0)",
+    ),
+    split_label: str = typer.Option("test", help="Frozen split label provenance"),
+    fold_index: int | None = typer.Option(None, help="Optional frozen walk-forward fold index"),
+    holding_period: str = typer.Option("5m", help="Frozen exit holding period"),
+    position_notional: str = typer.Option(str(LP_DEFAULT_NOTIONAL), help="Paper position notional"),
+    assumed_fee_bps: str | None = typer.Option(None, help="Assumed venue fee bps"),
+) -> None:
+    """Bounded Phase 6 live-paper replay (paper-only; never sends orders).
+
+    Requires explicit venue/duration/max-events/max-signals/max-trades/queue-capacity,
+    frozen rule identity, paper starting cash, output dir, and replay path.
+    Does not start an indefinite daemon or perform HTTP.
+    """
+    try:
+        start_dt = parse_cli_datetime(session_start)
+        duration_td = parse_lp_duration(duration)
+        holding_td = parse_lp_duration(holding_period)
+        cash = require_finite_decimal(paper_starting_cash, name="paper_starting_cash")
+        notional = require_finite_decimal(position_notional, name="position_notional")
+        fee = require_finite_decimal(assumed_fee_bps, name="assumed_fee_bps") if assumed_fee_bps is not None else None
+        cond_specs = rule_condition if rule_condition else ["age_source_event_seconds:gte:0"]
+        conditions = tuple(_parse_rule_condition(spec) for spec in cond_specs)
+        if not frozen_rule_id.strip() or not phase4_config_id.strip():
+            raise ConfigError("frozen Phase 4 rule identity is required (no rediscovery)")
+        if not venue.strip():
+            raise ConfigError("venue is required")
+        identity = FrozenCandidateIdentity(
+            rule_id=frozen_rule_id.strip(),
+            conditions=conditions,
+            human_readable=" AND ".join(f"{c.feature_name} {c.op} {c.threshold}" for c in conditions),
+            phase4_config_id=phase4_config_id.strip(),
+            split_label=split_label,
+            fold_index=fold_index,
+            provenance={"source": "cli_frozen_phase4"},
+        )
+        validate_live_paper_bounds(
+            duration=duration_td,
+            max_events=max_events,
+            max_signals=max_signals,
+            max_trades=max_trades,
+            queue_capacity=queue_capacity,
+            starting_cash=cash,
+            position_notional=notional,
+            holding_period=holding_td,
+        )
+        events = load_replay_events(replay_path)
+    except ConfigError as exc:
+        typer.secho(str(exc), fg=typer.colors.RED, err=True)
+        raise typer.Exit(2) from exc
+    except ValueError as exc:
+        typer.secho(str(exc), fg=typer.colors.RED, err=True)
+        raise typer.Exit(2) from exc
+
+    async def _run() -> None:
+        service = LivePaperService()
+        report, paths = await service.run_replay(
+            events=events,
+            identity=identity,
+            venue=venue,
+            duration=duration_td,
+            max_events=max_events,
+            max_signals=max_signals,
+            max_trades=max_trades,
+            queue_capacity=queue_capacity,
+            starting_cash=cash,
+            output_dir=output_dir,
+            session_start=start_dt,
+            position_notional=notional,
+            holding_period=holding_td,
+            assumed_fee_bps=fee,
+        )
+        typer.echo(
+            "live-paper complete: "
+            f"session_id={report.meta.session_id} signals={report.meta.signal_count} "
+            f"json={paths['json']} csv={paths['csv']} md={paths['markdown']}"
+        )
 
     try:
         asyncio.run(_run())

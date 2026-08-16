@@ -47,7 +47,7 @@ Package layout under `src/newcoin_trader`:
 | `risk` | Notional / size / open / drawdown / liquidity limits |
 | `execution` | Paper broker + fail-closed gateway |
 | `reports` | Reproducible JSON/CSV writers |
-| `cli` | Typer entry point (`smoke-offline`, `collect-once`, `poll`, `ingest-market-history`, `event-study`, `feature-research`) |
+| `cli` | Typer entry point (`smoke-offline`, `collect-once`, `poll`, `ingest-market-history`, `event-study`, `feature-research`, `executable-backtest`, `live-paper`) |
 
 ## Data flow
 
@@ -326,6 +326,33 @@ newcoin-trader executable-backtest \
 ```
 
 **Capability honesty:** the stored database has **no historical depth table**. Binance/CEX depth walking runs only against **supplied** historical L2 input; otherwise fills use timestamped price/liquidity/trade data with explicit `modeled_*` confidence. Raydium/Gecko use deterministic **modeled liquidity-participation impact** (never labeled AMM-exact). Fees are venue-configured assumed bps when historical fees are unavailable; fee/spread/slippage/impact are reported separately. Sub-minute latency requires point/trade resolution (`unsupported_resolution` otherwise). Pass `--phase4-records-json` to supply frozen Phase 4 decision records (Phase 5 never rediscovers rules). Outputs: `executable_backtest_summary.json`, `executable_backtest_trades.csv`, `executable_backtest_summary.md`, `executable_backtest_capabilities.json`.
+
+## Phase 6 bounded live-paper (paper-only replay)
+
+Phase 6 runs a **bounded paper session** over an injected/offline replay feed. It never sends orders, never opens wallets, never starts an indefinite daemon, and the `LivePaperService` itself performs no HTTP. It reuses Phase 4 `build_decision_feature_record` (availability + PIT) and Phase 5 fill helpers (CEX depth when supplied, otherwise labeled modeled; DEX modeled liquidity only).
+
+```bash
+# Offline replay only for this implementation pass. All bounds are required.
+newcoin-trader live-paper \
+  --venue binance \
+  --duration 1h \
+  --max-events 50 \
+  --max-signals 20 \
+  --max-trades 20 \
+  --queue-capacity 100 \
+  --frozen-rule-id <phase4-rule-id> \
+  --phase4-config-id <phase4-config-id> \
+  --paper-starting-cash 10000 \
+  --session-start 2024-01-01T12:00:00+00:00 \
+  --holding-period 5m \
+  --position-notional 100 \
+  --replay-path fixtures/live_paper_replay.json \
+  --output-dir artifacts/live_paper
+```
+
+`--max-trades` caps **paper positions / round-trips** (not fills). Reports expose `trade_count` (positions) and `fill_count` separately. `--max-events` admissions are audited (`supplied_event_count` / `admitted_event_count` / `max_events_rejected_count`) and are separate from queue overflow. Source **and** received clocks are PIT-checked (strict zero future tolerance by default). Session activity stays within `[session_start, session_end]`; exits beyond the session horizon do not execute. Partial exits retain remaining quantity and pro-rata cost basis until flat.
+
+Outputs: `live_paper_summary.json`, `live_paper_signals.csv`, `live_paper_fills.csv`, `live_paper_summary.md`. Durable session/signal/position state uses Alembic revision `0002_live_paper_session_state` (paper IDs only; no real accounts). Seen signal/fill IDs are merged monotonically across restarts (never wiped by an empty replay). Queue overflow is auditable and never a silent drop.
 
 ## License
 
