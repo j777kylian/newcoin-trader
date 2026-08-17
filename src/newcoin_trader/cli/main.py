@@ -6,6 +6,7 @@ import asyncio
 from pathlib import Path
 
 import typer
+from sqlalchemy.exc import OperationalError
 
 from newcoin_trader.config import load_settings
 from newcoin_trader.demo import run_offline_smoke
@@ -89,6 +90,7 @@ from newcoin_trader.services.wiring import (
     build_market_history_service,
     open_live_stack,
     open_research_db_stack,
+    require_application_database_url,
 )
 
 app = typer.Typer(
@@ -699,6 +701,7 @@ def live_paper(
     - replay: requires --replay-path (offline JSON; no HTTP in LivePaperService)
     - prospective: requires --poll-interval, --symbol, --max-polls,
       --max-observations-per-token, --max-total-observations; Binance public Spot only
+    Requires DATABASE_URL. Persists session/signal/position rows after process.
     """
     try:
         mode_norm = mode.strip().lower()
@@ -788,81 +791,88 @@ def live_paper(
         raise typer.Exit(2) from exc
 
     async def _run() -> None:
-        service = LivePaperService()
-        if mode_norm == "prospective":
-            from datetime import UTC, datetime
+        require_application_database_url()
+        settings = load_settings()
+        try:
+            async with open_research_db_stack(settings) as stack:
+                async with stack.session_factory() as session:
+                    service = LivePaperService(session=session)
+                    if mode_norm == "prospective":
+                        from datetime import UTC, datetime
 
-            from newcoin_trader.collectors.binance.client import BinanceClient
-            from newcoin_trader.collectors.http import AsyncHttpClient
-            from newcoin_trader.research.prospective_feed import build_prospective_feed
+                        from newcoin_trader.collectors.binance.client import BinanceClient
+                        from newcoin_trader.collectors.http import AsyncHttpClient
+                        from newcoin_trader.research.prospective_feed import build_prospective_feed
 
-            assert poll_td is not None
-            assert symbol is not None
-            assert max_polls is not None
-            assert max_observations_per_token is not None
-            assert max_total_observations is not None
-            settings = load_settings()
-            http = AsyncHttpClient(
-                timeout_seconds=settings.http_timeout_seconds,
-                max_attempts=settings.http_max_attempts,
-                backoff_seconds=settings.http_backoff_seconds,
-                rate_limit_per_second=settings.http_rate_limit_per_second,
-            )
-            try:
-                feed = build_prospective_feed(
-                    venue=venue,
-                    client=BinanceClient(http=http, base_url=settings.binance_base_url),
-                    now=lambda: datetime.now(UTC),
-                    symbol=symbol,
-                    poll_interval=poll_td,
-                    duration=duration_td,
-                    max_polls=max_polls,
-                    max_events=max_events,
-                    max_observations_per_token=max_observations_per_token,
-                    max_total_observations=max_total_observations,
-                    queue_capacity=queue_capacity,
-                )
-                report, paths = await service.run_prospective(
-                    feed=feed,
-                    identity=identity,
-                    venue=venue,
-                    duration=duration_td,
-                    max_events=max_events,
-                    max_signals=max_signals,
-                    max_trades=max_trades,
-                    queue_capacity=queue_capacity,
-                    starting_cash=cash,
-                    output_dir=output_dir,
-                    session_start=start_dt,
-                    position_notional=notional,
-                    holding_period=holding_td,
-                    assumed_fee_bps=fee,
-                )
-            finally:
-                await http.aclose()
-        else:
-            assert events is not None
-            report, paths = await service.run_replay(
-                events=events,
-                identity=identity,
-                venue=venue,
-                duration=duration_td,
-                max_events=max_events,
-                max_signals=max_signals,
-                max_trades=max_trades,
-                queue_capacity=queue_capacity,
-                starting_cash=cash,
-                output_dir=output_dir,
-                session_start=start_dt,
-                position_notional=notional,
-                holding_period=holding_td,
-                assumed_fee_bps=fee,
-            )
-        typer.echo(
-            "live-paper complete: "
-            f"session_id={report.meta.session_id} signals={report.meta.signal_count} "
-            f"json={paths['json']} csv={paths['csv']} md={paths['markdown']}"
-        )
+                        assert poll_td is not None
+                        assert symbol is not None
+                        assert max_polls is not None
+                        assert max_observations_per_token is not None
+                        assert max_total_observations is not None
+                        http = AsyncHttpClient(
+                            timeout_seconds=settings.http_timeout_seconds,
+                            max_attempts=settings.http_max_attempts,
+                            backoff_seconds=settings.http_backoff_seconds,
+                            rate_limit_per_second=settings.http_rate_limit_per_second,
+                        )
+                        try:
+                            feed = build_prospective_feed(
+                                venue=venue,
+                                client=BinanceClient(http=http, base_url=settings.binance_base_url),
+                                now=lambda: datetime.now(UTC),
+                                symbol=symbol,
+                                poll_interval=poll_td,
+                                duration=duration_td,
+                                max_polls=max_polls,
+                                max_events=max_events,
+                                max_observations_per_token=max_observations_per_token,
+                                max_total_observations=max_total_observations,
+                                queue_capacity=queue_capacity,
+                            )
+                            report, paths = await service.run_prospective(
+                                feed=feed,
+                                identity=identity,
+                                venue=venue,
+                                duration=duration_td,
+                                max_events=max_events,
+                                max_signals=max_signals,
+                                max_trades=max_trades,
+                                queue_capacity=queue_capacity,
+                                starting_cash=cash,
+                                output_dir=output_dir,
+                                session_start=start_dt,
+                                position_notional=notional,
+                                holding_period=holding_td,
+                                assumed_fee_bps=fee,
+                            )
+                        finally:
+                            await http.aclose()
+                    else:
+                        assert events is not None
+                        report, paths = await service.run_replay(
+                            events=events,
+                            identity=identity,
+                            venue=venue,
+                            duration=duration_td,
+                            max_events=max_events,
+                            max_signals=max_signals,
+                            max_trades=max_trades,
+                            queue_capacity=queue_capacity,
+                            starting_cash=cash,
+                            output_dir=output_dir,
+                            session_start=start_dt,
+                            position_notional=notional,
+                            holding_period=holding_td,
+                            assumed_fee_bps=fee,
+                        )
+                    await session.commit()
+                    typer.echo(
+                        "live-paper complete: "
+                        f"session_id={report.meta.session_id} signals={report.meta.signal_count} "
+                        f"json={paths['json']} csv={paths['csv']} md={paths['markdown']}"
+                    )
+        except OperationalError as exc:
+            raise ConfigError("DATABASE_URL is unavailable for live-paper persistence") from exc
 
     try:
         asyncio.run(_run())

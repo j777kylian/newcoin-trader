@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
@@ -36,6 +37,14 @@ class ResearchDbStack:
     settings: Settings
     engine: AsyncEngine
     session_factory: async_sessionmaker[AsyncSession]
+
+
+def require_application_database_url() -> str:
+    """Return process DATABASE_URL only. Never reads the test-database env."""
+    url = os.environ.get("DATABASE_URL", "").strip()
+    if not url:
+        raise ConfigError("DATABASE_URL is required for live-paper persistence")
+    return url
 
 
 @asynccontextmanager

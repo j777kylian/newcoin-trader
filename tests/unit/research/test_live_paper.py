@@ -685,7 +685,7 @@ async def test_live_paper_service_accepts_injected_feed_no_http(tmp_path: Path) 
     assert paths["markdown"].exists()
 
 
-def test_load_replay_and_cli_requires_bounds(tmp_path: Path) -> None:
+def test_load_replay_and_cli_requires_bounds(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     listing = _listing()
     decision = T0 + timedelta(minutes=1)
     events = [
@@ -703,6 +703,35 @@ def test_load_replay_and_cli_requires_bounds(tmp_path: Path) -> None:
 
     missing = runner.invoke(app, ["live-paper"])
     assert missing.exit_code != 0
+
+    from contextlib import asynccontextmanager
+    from types import SimpleNamespace
+
+    class _DummySession:
+        async def commit(self) -> None:
+            return None
+
+        async def __aenter__(self) -> _DummySession:
+            return self
+
+        async def __aexit__(self, *args: object) -> None:
+            return None
+
+    class _DummyFactory:
+        def __call__(self) -> _DummySession:
+            return _DummySession()
+
+    @asynccontextmanager
+    async def _dummy_stack(settings: object) -> object:
+        yield SimpleNamespace(settings=settings, engine=None, session_factory=_DummyFactory())
+
+    def _init(self: LivePaperService, session: object | None = None) -> None:
+        self._session = session  # type: ignore[assignment]
+        self._repo = None
+
+    monkeypatch.setenv("DATABASE_URL", "postgresql+asyncpg://unit-test/newcoin")
+    monkeypatch.setattr("newcoin_trader.cli.main.open_research_db_stack", _dummy_stack)
+    monkeypatch.setattr(LivePaperService, "__init__", _init)
 
     result = runner.invoke(
         app,
