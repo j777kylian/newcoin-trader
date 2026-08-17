@@ -654,8 +654,35 @@ def live_paper(
     phase4_config_id: str = typer.Option(..., help="Frozen Phase 4 config_id provenance (required)"),
     paper_starting_cash: str = typer.Option(..., help="Paper starting cash (required; not real capital)"),
     output_dir: Path = typer.Option(..., help="Directory for JSON/CSV/Markdown live-paper artifacts; required"),
-    replay_path: Path = typer.Option(..., help="Offline replay JSON with timestamped events; required for this pass"),
     session_start: str = typer.Option(..., help="UTC ISO session start clock"),
+    mode: str = typer.Option(
+        "replay",
+        help="Mutually exclusive feed mode: replay (offline JSON) or prospective (bounded public GET)",
+    ),
+    replay_path: Path | None = typer.Option(
+        None,
+        help="Offline replay JSON with timestamped events (required for --mode replay)",
+    ),
+    poll_interval: str | None = typer.Option(
+        None,
+        help="Prospective poll interval (e.g. 5s); required for --mode prospective",
+    ),
+    symbol: str | None = typer.Option(
+        None,
+        help="Prospective Binance Spot symbol (required for --mode prospective)",
+    ),
+    max_polls: int | None = typer.Option(
+        None,
+        help="Prospective hard cap on polls (required for --mode prospective)",
+    ),
+    max_observations_per_token: int | None = typer.Option(
+        None,
+        help="Prospective hard cap on observations per token (required for --mode prospective)",
+    ),
+    max_total_observations: int | None = typer.Option(
+        None,
+        help="Prospective hard cap on total market observations (required for --mode prospective)",
+    ),
     rule_condition: list[str] | None = typer.Option(
         None,
         help="Frozen rule condition feature:op:threshold (repeatable; default age_source_event_seconds:gte:0)",
@@ -666,13 +693,27 @@ def live_paper(
     position_notional: str = typer.Option(str(LP_DEFAULT_NOTIONAL), help="Paper position notional"),
     assumed_fee_bps: str | None = typer.Option(None, help="Assumed venue fee bps"),
 ) -> None:
-    """Bounded Phase 6 live-paper replay (paper-only; never sends orders).
+    """Bounded Phase 6/6.5 live-paper (paper-only; never sends orders).
 
-    Requires explicit venue/duration/max-events/max-signals/max-trades/queue-capacity,
-    frozen rule identity, paper starting cash, output dir, and replay path.
-    Does not start an indefinite daemon or perform HTTP.
+    Modes are mutually exclusive:
+    - replay: requires --replay-path (offline JSON; no HTTP in LivePaperService)
+    - prospective: requires --poll-interval, --symbol, --max-polls,
+      --max-observations-per-token, --max-total-observations; Binance public Spot only
     """
     try:
+        mode_norm = mode.strip().lower()
+        if mode_norm not in {"replay", "prospective"}:
+            raise ConfigError("live-paper --mode must be 'replay' or 'prospective'")
+        if mode_norm == "replay" and replay_path is None:
+            raise ConfigError("live-paper --mode replay requires --replay-path")
+        if mode_norm == "prospective" and replay_path is not None:
+            raise ConfigError("live-paper --mode prospective cannot be combined with --replay-path")
+        if mode_norm == "replay" and any(
+            value is not None
+            for value in (poll_interval, symbol, max_polls, max_observations_per_token, max_total_observations)
+        ):
+            raise ConfigError("live-paper --mode replay does not accept prospective-only options")
+
         start_dt = parse_cli_datetime(session_start)
         duration_td = parse_lp_duration(duration)
         holding_td = parse_lp_duration(holding_period)
@@ -704,7 +745,41 @@ def live_paper(
             position_notional=notional,
             holding_period=holding_td,
         )
-        events = load_replay_events(replay_path)
+
+        if mode_norm == "prospective":
+            from newcoin_trader.research.prospective_capabilities import prospective_venue_supported
+            from newcoin_trader.research.prospective_feed import validate_prospective_feed_bounds
+
+            if not prospective_venue_supported(venue):
+                raise ConfigError(
+                    f"unsupported prospective venue: {venue!r} "
+                    "(Phase 6.5 supports binance only; no silent replay fallback)"
+                )
+            if poll_interval is None:
+                raise ConfigError("live-paper --mode prospective requires --poll-interval")
+            if symbol is None or not symbol.strip():
+                raise ConfigError("live-paper --mode prospective requires --symbol")
+            if max_polls is None:
+                raise ConfigError("live-paper --mode prospective requires --max-polls")
+            if max_observations_per_token is None:
+                raise ConfigError("live-paper --mode prospective requires --max-observations-per-token")
+            if max_total_observations is None:
+                raise ConfigError("live-paper --mode prospective requires --max-total-observations")
+            poll_td = parse_lp_duration(poll_interval)
+            validate_prospective_feed_bounds(
+                poll_interval=poll_td,
+                duration=duration_td,
+                max_polls=max_polls,
+                max_events=max_events,
+                max_observations_per_token=max_observations_per_token,
+                max_total_observations=max_total_observations,
+                queue_capacity=queue_capacity,
+            )
+            events = None
+        else:
+            assert replay_path is not None
+            events = load_replay_events(replay_path)
+            poll_td = None
     except ConfigError as exc:
         typer.secho(str(exc), fg=typer.colors.RED, err=True)
         raise typer.Exit(2) from exc
@@ -714,22 +789,75 @@ def live_paper(
 
     async def _run() -> None:
         service = LivePaperService()
-        report, paths = await service.run_replay(
-            events=events,
-            identity=identity,
-            venue=venue,
-            duration=duration_td,
-            max_events=max_events,
-            max_signals=max_signals,
-            max_trades=max_trades,
-            queue_capacity=queue_capacity,
-            starting_cash=cash,
-            output_dir=output_dir,
-            session_start=start_dt,
-            position_notional=notional,
-            holding_period=holding_td,
-            assumed_fee_bps=fee,
-        )
+        if mode_norm == "prospective":
+            from datetime import UTC, datetime
+
+            from newcoin_trader.collectors.binance.client import BinanceClient
+            from newcoin_trader.collectors.http import AsyncHttpClient
+            from newcoin_trader.research.prospective_feed import build_prospective_feed
+
+            assert poll_td is not None
+            assert symbol is not None
+            assert max_polls is not None
+            assert max_observations_per_token is not None
+            assert max_total_observations is not None
+            settings = load_settings()
+            http = AsyncHttpClient(
+                timeout_seconds=settings.http_timeout_seconds,
+                max_attempts=settings.http_max_attempts,
+                backoff_seconds=settings.http_backoff_seconds,
+                rate_limit_per_second=settings.http_rate_limit_per_second,
+            )
+            try:
+                feed = build_prospective_feed(
+                    venue=venue,
+                    client=BinanceClient(http=http, base_url=settings.binance_base_url),
+                    now=lambda: datetime.now(UTC),
+                    symbol=symbol,
+                    poll_interval=poll_td,
+                    duration=duration_td,
+                    max_polls=max_polls,
+                    max_events=max_events,
+                    max_observations_per_token=max_observations_per_token,
+                    max_total_observations=max_total_observations,
+                    queue_capacity=queue_capacity,
+                )
+                report, paths = await service.run_prospective(
+                    feed=feed,
+                    identity=identity,
+                    venue=venue,
+                    duration=duration_td,
+                    max_events=max_events,
+                    max_signals=max_signals,
+                    max_trades=max_trades,
+                    queue_capacity=queue_capacity,
+                    starting_cash=cash,
+                    output_dir=output_dir,
+                    session_start=start_dt,
+                    position_notional=notional,
+                    holding_period=holding_td,
+                    assumed_fee_bps=fee,
+                )
+            finally:
+                await http.aclose()
+        else:
+            assert events is not None
+            report, paths = await service.run_replay(
+                events=events,
+                identity=identity,
+                venue=venue,
+                duration=duration_td,
+                max_events=max_events,
+                max_signals=max_signals,
+                max_trades=max_trades,
+                queue_capacity=queue_capacity,
+                starting_cash=cash,
+                output_dir=output_dir,
+                session_start=start_dt,
+                position_notional=notional,
+                holding_period=holding_td,
+                assumed_fee_bps=fee,
+            )
         typer.echo(
             "live-paper complete: "
             f"session_id={report.meta.session_id} signals={report.meta.signal_count} "

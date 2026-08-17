@@ -14,6 +14,7 @@ from newcoin_trader.domain.executable_backtest import (
     ExecutableBacktestStatus,
     ExecutionMarketObservation,
     FrozenCandidateIdentity,
+    HistoricalDepthBook,
 )
 from newcoin_trader.domain.feature_research import CandidateRule, FeatureMarketInput
 from newcoin_trader.domain.live_paper import (
@@ -107,6 +108,81 @@ def check_freshness(
             detail="source_timestamp older than freshness max_age",
         )
     return FreshnessDecision(accepted=True)
+
+
+def _parse_depth_clock(value: str | None) -> datetime | None:
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value)
+        return require_utc(parsed)
+    except (TypeError, ValueError):
+        return None
+
+
+def _attached_depth_pit(
+    book: HistoricalDepthBook,
+    *,
+    as_of: datetime,
+    session_start: datetime,
+    session_end: datetime,
+    max_age: timedelta,
+    future_tolerance: timedelta,
+) -> FreshnessDecision:
+    """Guard attached L2 independently of the host trade clocks (no invented source time)."""
+    prov = book.provenance or {}
+    received = _parse_depth_clock(prov.get("depth_received_timestamp")) or require_utc(book.timestamp)
+    source = _parse_depth_clock(prov.get("depth_source_timestamp"))
+    start = require_utc(session_start)
+    end = require_utc(session_end)
+    clock = require_utc(as_of)
+    if received < start:
+        return FreshnessDecision(
+            accepted=False,
+            reason=LivePaperRejectReason.BEFORE_SESSION,
+            detail="depth_received_timestamp before session_start",
+        )
+    if received > end:
+        return FreshnessDecision(
+            accepted=False,
+            reason=LivePaperRejectReason.SESSION_EXPIRED,
+            detail="depth_received_timestamp after session_end",
+        )
+    if source is not None:
+        if source < start:
+            return FreshnessDecision(
+                accepted=False,
+                reason=LivePaperRejectReason.BEFORE_SESSION,
+                detail="depth_source_timestamp before session_start",
+            )
+        if source > end:
+            return FreshnessDecision(
+                accepted=False,
+                reason=LivePaperRejectReason.SESSION_EXPIRED,
+                detail="depth_source_timestamp after session_end",
+            )
+    source_for_freshness = source if source is not None else received
+    return check_freshness(
+        source_timestamp=source_for_freshness,
+        received_timestamp=received,
+        decision_time=clock,
+        max_age=max_age,
+        future_tolerance=future_tolerance,
+    )
+
+
+def _drop_unusable_attached_depth(market: ReplayMarketEvent) -> ReplayMarketEvent:
+    updates: dict[str, Any] = {"depth": None}
+    if market.provenance.get("liquidity_from_depth") == "true":
+        updates["liquidity"] = None
+    return market.model_copy(update=updates)
+
+
+def _label_depth_pit_fallback(fill: Any, decision: FreshnessDecision) -> Any:
+    reason = decision.reason.value if decision.reason is not None else "depth_pit"
+    extra = f"depth_pit_rejected:{reason}"
+    label = fill.label if extra in fill.label else f"{fill.label};{extra}"
+    return fill.model_copy(update={"label": label})
 
 
 _TRANSITIONS: dict[tuple[PositionLifecycle, str], PositionLifecycle] = {
@@ -573,12 +649,15 @@ def process_live_paper_session(
 
     listings: dict[str, ReplayMarketEvent] = {}
     markets: dict[str, list[ReplayMarketEvent]] = {}
+    markets_by_token: dict[str, list[ReplayMarketEvent]] = {}
     for event in queue:
         if event.kind == "listing" and event.listing is not None:
             # Preserve outer ReplayMarketEvent clocks/identity/provenance (not listing alone).
             listings[event.event_id] = event
         elif event.kind == "market":
             markets.setdefault(event.event_id, []).append(event)
+            # Prospective trade-keyed events share token identity with the listing.
+            markets_by_token.setdefault(event.token_address, []).append(event)
 
     ledger = PortfolioLedger(starting_cash=starting_cash)
     if prior_realized != 0:
@@ -652,6 +731,25 @@ def process_live_paper_session(
             _note_freshness(freshness)
             return False
         return True
+
+    def _depth_view(
+        m: ReplayMarketEvent, *, as_of: datetime, note: bool
+    ) -> tuple[ReplayMarketEvent, FreshnessDecision | None]:
+        if m.depth is None:
+            return m, None
+        pit = _attached_depth_pit(
+            m.depth,
+            as_of=as_of,
+            session_start=start,
+            session_end=end,
+            max_age=freshness_max_age,
+            future_tolerance=future_tolerance,
+        )
+        if pit.accepted:
+            return m, None
+        if note:
+            _note_freshness(pit)
+        return _drop_unusable_attached_depth(m), pit
 
     for event_id, listing_event in sorted(
         listings.items(),
@@ -759,13 +857,17 @@ def process_live_paper_session(
             )
             continue
 
+        # Prefer shared listing event_id (Phase 6 replay); else token match (Phase 6.5 trades).
         event_markets = markets.get(event_id, [])
+        if not event_markets:
+            event_markets = markets_by_token.get(listing.token_address, [])
         feature_inputs: list[FeatureMarketInput] = []
         fresh_markets: list[ReplayMarketEvent] = []
         for m in event_markets:
             if not _market_usable(m, as_of=decision_time):
                 continue
-            fi = _market_to_feature_input(m)
+            viewed, _depth_pit = _depth_view(m, as_of=decision_time, note=False)
+            fi = _market_to_feature_input(viewed)
             if fi is not None:
                 feature_inputs.append(fi)
                 fresh_markets.append(m)
@@ -812,12 +914,14 @@ def process_live_paper_session(
             )
             continue
 
+        fill_market, entry_depth_pit = _depth_view(entry_market, as_of=decision_time, note=True)
+
         risk = _evaluate_entry_risk(
             ledger=ledger,
             notional=position_notional,
             token=listing.token_address,
             venue=venue.value,
-            liquidity=entry_market.liquidity,
+            liquidity=fill_market.liquidity,
             min_liquidity=min_liquidity,
             max_open=max_open_positions,
             max_token=max_token_exposure,
@@ -859,7 +963,7 @@ def process_live_paper_session(
             continue
 
         entry_fill = _simulate_entry(
-            market=entry_market,
+            market=fill_market,
             venue=venue,
             position_notional=position_notional,
             max_participation=max_participation,
@@ -867,6 +971,8 @@ def process_live_paper_session(
             request_time=decision_time,
             fill_time=decision_time,
         )
+        if entry_depth_pit is not None and entry_fill is not None:
+            entry_fill = _label_depth_pit_fallback(entry_fill, entry_depth_pit)
         if entry_fill is None or entry_fill.fill_qty <= 0:
             _reject(
                 signal_id=sig_id,
@@ -917,6 +1023,9 @@ def process_live_paper_session(
             )
             continue
 
+        signal_prov = {"fill_mode": entry_fill.mode.value}
+        if entry_depth_pit is not None and entry_depth_pit.reason is not None:
+            signal_prov["depth_pit_rejected"] = entry_depth_pit.reason.value
         accepted = PaperSignalRecord(
             signal_id=sig_id,
             session_id=session_id,
@@ -929,7 +1038,7 @@ def process_live_paper_session(
             status=LivePaperStatus.SIGNAL_ACCEPTED,
             source_timestamp=entry_market.source_timestamp,
             received_timestamp=entry_market.received_timestamp,
-            provenance={"fill_mode": entry_fill.mode.value},
+            provenance=signal_prov,
         )
         signals.append(accepted)
         seen_signals.add(sig_id)
@@ -1007,8 +1116,9 @@ def process_live_paper_session(
             if not _market_usable(m, as_of=fill_as_of):
                 continue
 
+            exit_market, exit_depth_pit = _depth_view(m, as_of=fill_as_of, note=True)
             exit_fill = _simulate_exit(
-                market=m,
+                market=exit_market,
                 venue=venue,
                 qty=remaining_qty,
                 max_participation=max_participation,
@@ -1016,6 +1126,8 @@ def process_live_paper_session(
                 request_time=exit_deadline,
                 fill_time=fill_as_of,
             )
+            if exit_depth_pit is not None and exit_fill is not None:
+                exit_fill = _label_depth_pit_fallback(exit_fill, exit_depth_pit)
             if exit_fill is None or exit_fill.fill_qty <= 0:
                 continue
 

@@ -47,7 +47,7 @@ Package layout under `src/newcoin_trader`:
 | `risk` | Notional / size / open / drawdown / liquidity limits |
 | `execution` | Paper broker + fail-closed gateway |
 | `reports` | Reproducible JSON/CSV writers |
-| `cli` | Typer entry point (`smoke-offline`, `collect-once`, `poll`, `ingest-market-history`, `event-study`, `feature-research`, `executable-backtest`, `live-paper`) |
+| `cli` | Typer entry point (`smoke-offline`, `collect-once`, `poll`, `ingest-market-history`, `event-study`, `feature-research`, `executable-backtest`, `live-paper` replay/prospective) |
 
 ## Data flow
 
@@ -334,6 +334,7 @@ Phase 6 runs a **bounded paper session** over an injected/offline replay feed. I
 ```bash
 # Offline replay only for this implementation pass. All bounds are required.
 newcoin-trader live-paper \
+  --mode replay \
   --venue binance \
   --duration 1h \
   --max-events 50 \
@@ -353,6 +354,41 @@ newcoin-trader live-paper \
 `--max-trades` caps **paper positions / round-trips** (not fills). Reports expose `trade_count` (positions) and `fill_count` separately. `--max-events` admissions are audited (`supplied_event_count` / `admitted_event_count` / `max_events_rejected_count`) and are separate from queue overflow. Source **and** received clocks are PIT-checked (strict zero future tolerance by default). Session activity stays within `[session_start, session_end]`; exits beyond the session horizon do not execute. Partial exits retain remaining quantity and pro-rata cost basis until flat.
 
 Outputs: `live_paper_summary.json`, `live_paper_signals.csv`, `live_paper_fills.csv`, `live_paper_summary.md`. Durable session/signal/position state uses Alembic revision `0002_live_paper_session_state` (paper IDs only; no real accounts). Seen signal/fill IDs are merged monotonically across restarts (never wiped by an empty replay). Queue overflow is auditable and never a silent drop.
+
+## Phase 6.5 bounded prospective read-only feed (Binance Spot)
+
+Phase 6.5 adds a **bounded prospective** mode that polls Binance public Spot GET endpoints for **one explicitly configured symbol**, normalizes to the same `ReplayMarketEvent` contract, then reuses the Phase 6 `run_replay` / `process_live_paper_session` engine unchanged (no second paper engine). Receipt time is captured locally after each response and is never copied from source timestamps.
+
+| Source | Prospective readiness | Notes |
+|--------|----------------------|-------|
+| **Binance Spot** | Ready (this pass) | `exchangeInfo`, `trades`, `ticker/24hr`, `depth` via existing `BinanceClient` / `GetJsonClient`. No API key. |
+| **Birdeye** | Partial | Discovery only; not admitted as a prospective venue here. |
+| **Raydium** | Partial | Pool/quote only; no prospective event bridge in this pass. |
+| **GeckoTerminal** | Not ready | Needs an externally supplied pool; minute OHLCV only. |
+
+Unsupported prospective venues fail with a controlled `ConfigError` (no silent replay fallback). Modes are mutually exclusive: `--mode replay` requires `--replay-path`; `--mode prospective` requires `--poll-interval`, `--symbol`, `--max-polls`, `--max-observations-per-token`, and `--max-total-observations`.
+
+```bash
+# Prospective mode (bounded public GET). Do not treat as live trading.
+newcoin-trader live-paper \
+  --mode prospective \
+  --venue binance \
+  --symbol NEWUSDT \
+  --duration 30m \
+  --poll-interval 5s \
+  --max-polls 360 \
+  --max-events 500 \
+  --max-signals 50 \
+  --max-trades 20 \
+  --max-observations-per-token 200 \
+  --max-total-observations 500 \
+  --queue-capacity 500 \
+  --frozen-rule-id <phase4-rule-id> \
+  --phase4-config-id <phase4-config-id> \
+  --paper-starting-cash 10000 \
+  --session-start 2024-01-01T12:00:00+00:00 \
+  --output-dir artifacts/live_paper_prospective
+```
 
 ## License
 

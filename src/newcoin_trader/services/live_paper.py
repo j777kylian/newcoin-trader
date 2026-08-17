@@ -1,4 +1,4 @@
-"""Phase 6 bounded live-paper orchestration (injected replay only; no HTTP)."""
+"""Phase 6/6.5 bounded live-paper orchestration (injected feed/replay; no HTTP)."""
 
 from __future__ import annotations
 
@@ -23,6 +23,10 @@ from newcoin_trader.research.live_paper_config import (
 )
 from newcoin_trader.research.live_paper_engine import process_live_paper_session
 from newcoin_trader.research.live_paper_run import emit_live_paper_artifacts
+from newcoin_trader.research.prospective_feed import (
+    ProspectiveFeed,
+    summarize_feed_result,
+)
 
 
 def load_replay_events(path: Path) -> tuple[ReplayMarketEvent, ...]:
@@ -157,4 +161,53 @@ class LivePaperService:
         if self._repo is not None:
             await self._repo.persist_report(report)
         paths = emit_live_paper_artifacts(report, output_dir)
+        return report, paths
+
+    async def run_prospective(
+        self,
+        *,
+        feed: ProspectiveFeed,
+        identity: FrozenCandidateIdentity,
+        venue: str,
+        duration: timedelta,
+        max_events: int,
+        max_signals: int,
+        max_trades: int,
+        queue_capacity: int,
+        starting_cash: Decimal,
+        output_dir: Path,
+        session_start: datetime,
+        position_notional: Decimal = DEFAULT_POSITION_NOTIONAL,
+        holding_period: timedelta = DEFAULT_HOLDING_PERIOD,
+        decision_delay: timedelta = DEFAULT_DECISION_DELAY,
+        assumed_fee_bps: Decimal | None = None,
+        phase4_gross_return: Decimal | None = None,
+        phase5_historical_net: Decimal | None = None,
+        state_store: dict[str, object] | None = None,
+    ) -> tuple[LivePaperReport, dict[str, Path]]:
+        """Collect a bounded prospective feed, then reuse the Phase 6 run_replay engine path."""
+        feed_result = await feed.collect_bounded()
+        report, paths = await self.run_replay(
+            events=feed_result.events,
+            identity=identity,
+            venue=venue,
+            duration=duration,
+            max_events=max_events,
+            max_signals=max_signals,
+            max_trades=max_trades,
+            queue_capacity=queue_capacity,
+            starting_cash=starting_cash,
+            output_dir=output_dir,
+            session_start=session_start,
+            position_notional=position_notional,
+            holding_period=holding_period,
+            decision_delay=decision_delay,
+            assumed_fee_bps=assumed_fee_bps,
+            phase4_gross_return=phase4_gross_return,
+            phase5_historical_net=phase5_historical_net,
+            state_store=state_store,
+        )
+        extras = dict(report.extras)
+        extras["prospective_feed"] = summarize_feed_result(feed_result)
+        report = report.model_copy(update={"extras": extras})
         return report, paths
