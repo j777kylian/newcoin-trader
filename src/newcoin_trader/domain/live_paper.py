@@ -79,6 +79,73 @@ class PositionLifecycle(StrEnum):
     FAILED_EXIT = "failed_exit"
 
 
+class FailedExitReason(StrEnum):
+    NO_USABLE_EXIT_CANDIDATE = "no_usable_exit_candidate"
+    ALL_EXIT_CANDIDATES_REJECTED = "all_exit_candidates_rejected"
+    ALL_EXIT_EXECUTION_ATTEMPTS_UNFILLED = "all_exit_execution_attempts_unfilled"
+    MIXED_EXIT_FAILURES = "mixed_exit_failures"
+
+
+class ExitAttemptAudit(BaseModel):
+    """Observational record of one post-deadline exit candidate. No invented clocks or fills."""
+
+    model_config = ConfigDict(frozen=True)
+
+    event_id: str
+    source: str
+    source_timestamp: datetime
+    received_timestamp: datetime
+    price: Decimal | None = None
+    requested_qty: Decimal
+    market_usable: bool
+    market_reject_reason: str | None = None
+    depth_available: bool
+    depth_source_timestamp: datetime | None = None
+    depth_received_timestamp: datetime | None = None
+    depth_pit_accepted: bool | None = None
+    depth_pit_reason: str | None = None
+    execution_mode: str
+    attempted: bool
+    fill_qty: Decimal | None = None
+    fill_price: Decimal | None = None
+    no_fill_reason: str | None = None
+    outcome: str
+
+    @field_validator(
+        "source_timestamp",
+        "received_timestamp",
+        "depth_source_timestamp",
+        "depth_received_timestamp",
+    )
+    @classmethod
+    def _aware(cls, value: datetime | None) -> datetime | None:
+        if value is None:
+            return None
+        return require_utc(value)
+
+
+class ExitAttemptDiagnostics(BaseModel):
+    """Bounded failed-exit diagnostics retained on a position."""
+
+    model_config = ConfigDict(frozen=True)
+
+    exit_deadline: datetime
+    failed_exit_reason: FailedExitReason | None = None
+    attempts: tuple[ExitAttemptAudit, ...] = ()
+    attempt_count_total: int
+    attempt_count_retained: int
+    truncated: bool
+    last_candidate_clock: datetime | None = None
+    last_reject_or_nofill_reason: str | None = None
+
+    @field_validator("exit_deadline", "last_candidate_clock")
+    @classmethod
+    def _aware(cls, value: datetime | None) -> datetime | None:
+        if value is None:
+            return None
+        return require_utc(value)
+
+
 class FreshnessDecision(BaseModel):
     model_config = ConfigDict(frozen=True)
 
@@ -163,6 +230,7 @@ class PaperPositionRecord(BaseModel):
     exit_time: datetime | None = None
     holding_period: timedelta
     label: str = WARNING_MODELED
+    exit_diagnostics: ExitAttemptDiagnostics | None = None
 
     @field_validator("entry_time", "exit_time")
     @classmethod

@@ -355,3 +355,118 @@ async def test_live_paper_repository_three_run_durable_idempotency(session: Asyn
     assert partial_report.positions[-1].remaining_qty is not None
     assert partial_report.positions[-1].remaining_qty > 0
     assert any(f.side is Side.SELL for f in partial_report.fills)
+
+
+@pytest.mark.asyncio
+async def test_live_paper_failed_exit_diagnostics_persist_and_reload(session: AsyncSession) -> None:
+    """Failed-exit audits round-trip through existing position meta_json."""
+    from datetime import timedelta
+
+    from sqlalchemy import select
+
+    from newcoin_trader.database.models import LivePaperPosition
+    from newcoin_trader.database.repositories.live_paper import LivePaperRepository
+    from newcoin_trader.domain.enums import Chain, Venue
+    from newcoin_trader.domain.event_study import ObservationResolution, TokenListingEvent
+    from newcoin_trader.domain.executable_backtest import FrozenCandidateIdentity
+    from newcoin_trader.domain.feature_research import RuleCondition
+    from newcoin_trader.domain.live_paper import FailedExitReason, PositionLifecycle, ReplayMarketEvent
+    from newcoin_trader.research.live_paper_engine import process_live_paper_session
+
+    t0 = datetime(2024, 3, 1, 12, 0, 0, tzinfo=UTC)
+    decision = t0 + timedelta(minutes=1)
+    exit_ts = decision + timedelta(minutes=5)
+
+    listing = TokenListingEvent(
+        event_id="fe1",
+        venue=Venue.BINANCE,
+        chain=Chain.BINANCE,
+        token_address="TOKEN",
+        pair_address="PAIR",
+        symbol="TOK",
+        source="binance",
+        source_event_time=t0,
+        first_seen_time=t0,
+        first_market_data_time=t0,
+        decision_available_time=t0,
+        provenance={"token_id": "fe1"},
+    )
+    listing_event = ReplayMarketEvent(
+        event_id=listing.event_id,
+        kind="listing",
+        venue=listing.venue,
+        token_address=listing.token_address,
+        chain=listing.chain.value,
+        source_timestamp=listing.source_event_time,
+        received_timestamp=listing.source_event_time,
+        source=listing.source,
+        listing=listing,
+        provenance=dict(listing.provenance),
+    )
+
+    def market(*, ts: datetime, price: str | None, event_id: str = "fe1") -> ReplayMarketEvent:
+        return ReplayMarketEvent(
+            event_id=event_id,
+            kind="market",
+            venue=Venue.BINANCE,
+            token_address="TOKEN",
+            chain="binance",
+            source_timestamp=ts,
+            received_timestamp=ts,
+            price=None if price is None else Decimal(price),
+            liquidity=Decimal("100000"),
+            volume=Decimal("1000"),
+            resolution=ObservationResolution.POINT,
+            source="binance:trade",
+            provenance={"kind": "trade"},
+        )
+
+    identity = FrozenCandidateIdentity(
+        rule_id="frozen-rule-failed-exit-obs",
+        conditions=(RuleCondition(feature_name="age_source_event_seconds", op="gte", threshold=Decimal("0")),),
+        human_readable="age_source_event_seconds gte 0",
+        phase4_config_id="cfg-phase4",
+        split_label="test",
+        fold_index=0,
+        provenance={"source": "frozen_phase4"},
+    )
+    report = process_live_paper_session(
+        events=[
+            listing_event,
+            market(ts=decision, price="10"),
+            market(ts=exit_ts, price=None),
+        ],
+        venue=Venue.BINANCE,
+        session_start=t0,
+        duration=timedelta(hours=1),
+        max_events=50,
+        max_signals=20,
+        max_trades=20,
+        queue_capacity=100,
+        starting_cash=Decimal("10000"),
+        position_notional=Decimal("100"),
+        holding_period=timedelta(minutes=5),
+        identity=identity,
+    )
+    failed = [p for p in report.positions if p.lifecycle is PositionLifecycle.FAILED_EXIT]
+    assert failed
+    pos = failed[-1]
+    assert pos.exit_diagnostics is not None
+    assert pos.exit_diagnostics.failed_exit_reason is FailedExitReason.ALL_EXIT_CANDIDATES_REJECTED
+
+    repo = LivePaperRepository(session)
+    await repo.persist_report(report)
+    await session.commit()
+    row = (
+        await session.scalars(
+            select(LivePaperPosition).where(
+                LivePaperPosition.session_id == pos.session_id,
+                LivePaperPosition.position_id == pos.position_id,
+            )
+        )
+    ).one()
+    assert row.lifecycle == PositionLifecycle.FAILED_EXIT.value
+    assert row.meta_json is not None
+    assert row.meta_json["failed_exit_reason"] == FailedExitReason.ALL_EXIT_CANDIDATES_REJECTED.value
+    assert row.meta_json["exit_attempt_audits"][0]["market_reject_reason"] == "missing_price"
+    assert row.meta_json["remaining_qty"] is not None

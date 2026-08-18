@@ -20,6 +20,9 @@ from newcoin_trader.domain.feature_research import CandidateRule, FeatureMarketI
 from newcoin_trader.domain.live_paper import (
     DISCLAIMER,
     WARNING_PAPER_ONLY,
+    ExitAttemptAudit,
+    ExitAttemptDiagnostics,
+    FailedExitReason,
     FreshnessDecision,
     LivePaperRejectReason,
     LivePaperReport,
@@ -58,13 +61,16 @@ from newcoin_trader.research.live_paper_config import (
     DEFAULT_MIN_LIQUIDITY,
     DEFAULT_SESSION_LOSS_LIMIT,
     ELIGIBILITY_RULES,
+    MAX_EXIT_ATTEMPT_AUDITS,
     validate_live_paper_bounds,
 )
 
 __all__ = [
     "BoundedEventQueue",
     "PortfolioLedger",
+    "build_exit_diagnostics",
     "check_freshness",
+    "derive_failed_exit_reason",
     "process_live_paper_session",
     "require_finite_controlled",
     "simulate_cex_depth_fill",
@@ -544,6 +550,154 @@ def _simulate_exit(
         assumed_fee_bps=assumed_fee_bps,
         request_time=request_time,
         fill_time=fill_time,
+    )
+
+
+def derive_failed_exit_reason(*, rejected: int, unfilled: int, filled: int) -> FailedExitReason:
+    total = rejected + unfilled + filled
+    if total == 0:
+        return FailedExitReason.NO_USABLE_EXIT_CANDIDATE
+    if rejected == total:
+        return FailedExitReason.ALL_EXIT_CANDIDATES_REJECTED
+    if unfilled == total:
+        return FailedExitReason.ALL_EXIT_EXECUTION_ATTEMPTS_UNFILLED
+    return FailedExitReason.MIXED_EXIT_FAILURES
+
+
+def _market_unusable_reason(
+    market: ReplayMarketEvent,
+    *,
+    as_of: datetime,
+    session_start: datetime,
+    session_end: datetime,
+    max_age: timedelta,
+    future_tolerance: timedelta,
+) -> str | None:
+    if market.source_timestamp < session_start or market.source_timestamp > session_end:
+        return "outside_session"
+    if market.received_timestamp < session_start or market.received_timestamp > session_end:
+        return "outside_session"
+    if market.source_timestamp > as_of:
+        return "future_source"
+    freshness = check_freshness(
+        source_timestamp=market.source_timestamp,
+        received_timestamp=market.received_timestamp,
+        decision_time=as_of,
+        max_age=max_age,
+        future_tolerance=future_tolerance,
+    )
+    if freshness.accepted:
+        return None
+    if freshness.reason is LivePaperRejectReason.STALE_SOURCE:
+        return "stale"
+    if freshness.reason is LivePaperRejectReason.FUTURE_SOURCE:
+        return "future_source"
+    if freshness.reason is LivePaperRejectReason.FUTURE_RECEIVED:
+        return "future_received"
+    return freshness.reason.value if freshness.reason is not None else "stale"
+
+
+def _depth_known_clocks(book: HistoricalDepthBook) -> tuple[datetime | None, datetime | None]:
+    prov = book.provenance or {}
+    source = _parse_depth_clock(prov.get("depth_source_timestamp"))
+    received = _parse_depth_clock(prov.get("depth_received_timestamp"))
+    if received is None:
+        received = require_utc(book.timestamp)
+    return source, received
+
+
+def _exit_depth_snapshot(
+    market: ReplayMarketEvent,
+    *,
+    pit: FreshnessDecision | None,
+    evaluated: bool,
+) -> dict[str, Any]:
+    if market.depth is None:
+        return {
+            "depth_available": False,
+            "depth_source_timestamp": None,
+            "depth_received_timestamp": None,
+            "depth_pit_accepted": None,
+            "depth_pit_reason": None,
+        }
+    source, received = _depth_known_clocks(market.depth)
+    pit_accepted: bool | None
+    pit_reason: str | None
+    if evaluated:
+        pit_accepted = pit is None
+        pit_reason = pit.reason.value if pit is not None and pit.reason is not None else None
+    else:
+        pit_accepted = None
+        pit_reason = None
+    return {
+        "depth_available": True,
+        "depth_source_timestamp": source,
+        "depth_received_timestamp": received,
+        "depth_pit_accepted": pit_accepted,
+        "depth_pit_reason": pit_reason,
+    }
+
+
+def _exit_attempt_audit(
+    market: ReplayMarketEvent,
+    *,
+    requested_qty: Decimal,
+    market_usable: bool,
+    outcome: str,
+    market_reject_reason: str | None = None,
+    execution_mode: str = "none",
+    attempted: bool = False,
+    fill_qty: Decimal | None = None,
+    fill_price: Decimal | None = None,
+    no_fill_reason: str | None = None,
+    pit: FreshnessDecision | None = None,
+    pit_evaluated: bool = False,
+) -> ExitAttemptAudit:
+    return ExitAttemptAudit(
+        event_id=market.event_id,
+        source=market.source,
+        source_timestamp=market.source_timestamp,
+        received_timestamp=market.received_timestamp,
+        price=market.price,
+        requested_qty=requested_qty,
+        market_usable=market_usable,
+        market_reject_reason=market_reject_reason,
+        execution_mode=execution_mode,
+        attempted=attempted,
+        fill_qty=fill_qty,
+        fill_price=fill_price,
+        no_fill_reason=no_fill_reason,
+        outcome=outcome,
+        **_exit_depth_snapshot(market, pit=pit, evaluated=pit_evaluated),
+    )
+
+
+def build_exit_diagnostics(
+    *,
+    exit_deadline: datetime,
+    audits: Sequence[ExitAttemptAudit],
+    remaining_qty: Decimal,
+) -> ExitAttemptDiagnostics | None:
+    if remaining_qty <= 0:
+        return None
+    rejected = sum(1 for audit in audits if audit.outcome == "rejected")
+    unfilled = sum(1 for audit in audits if audit.outcome == "unfilled")
+    filled = sum(1 for audit in audits if audit.outcome in {"filled", "partial"})
+    retained = tuple(audits[:MAX_EXIT_ATTEMPT_AUDITS])
+    last_reason: str | None = None
+    for audit in audits:
+        reason = audit.market_reject_reason or audit.no_fill_reason
+        if reason:
+            last_reason = reason
+    return ExitAttemptDiagnostics(
+        exit_deadline=exit_deadline,
+        failed_exit_reason=derive_failed_exit_reason(rejected=rejected, unfilled=unfilled, filled=filled),
+        attempts=retained,
+        attempt_count_total=len(audits),
+        attempt_count_retained=len(retained),
+        truncated=len(audits) > MAX_EXIT_ATTEMPT_AUDITS,
+        last_candidate_clock=audits[-1].source_timestamp if audits else None,
+        last_reject_or_nofill_reason=last_reason,
     )
 
 
@@ -1071,6 +1225,7 @@ def process_live_paper_session(
         last_exit_price: Decimal | None = None
         last_exit_time: datetime | None = None
         any_exit = False
+        exit_audits: list[ExitAttemptAudit] = []
 
         if exit_deadline > end:
             _reject(
@@ -1099,6 +1254,11 @@ def process_live_paper_session(
                     remaining_cost_basis=remaining_cost,
                     entry_time=decision_time,
                     holding_period=holding_period,
+                    exit_diagnostics=build_exit_diagnostics(
+                        exit_deadline=exit_deadline,
+                        audits=exit_audits,
+                        remaining_qty=remaining_qty,
+                    ),
                 )
             )
             continue
@@ -1109,14 +1269,49 @@ def process_live_paper_session(
             if m.source_timestamp < exit_deadline:
                 continue
             if m.source_timestamp > end:
+                exit_audits.append(
+                    _exit_attempt_audit(
+                        m,
+                        requested_qty=remaining_qty,
+                        market_usable=False,
+                        market_reject_reason="outside_session",
+                        outcome="rejected",
+                    )
+                )
                 break
             if m.price is None:
+                exit_audits.append(
+                    _exit_attempt_audit(
+                        m,
+                        requested_qty=remaining_qty,
+                        market_usable=False,
+                        market_reject_reason="missing_price",
+                        outcome="rejected",
+                    )
+                )
                 continue
             fill_as_of = m.source_timestamp
             if not _market_usable(m, as_of=fill_as_of):
+                exit_audits.append(
+                    _exit_attempt_audit(
+                        m,
+                        requested_qty=remaining_qty,
+                        market_usable=False,
+                        market_reject_reason=_market_unusable_reason(
+                            m,
+                            as_of=fill_as_of,
+                            session_start=start,
+                            session_end=end,
+                            max_age=freshness_max_age,
+                            future_tolerance=future_tolerance,
+                        ),
+                        outcome="rejected",
+                    )
+                )
                 continue
 
             exit_market, exit_depth_pit = _depth_view(m, as_of=fill_as_of, note=True)
+            execution_mode = "exact_depth" if exit_market.depth is not None else "modeled"
             exit_fill = _simulate_exit(
                 market=exit_market,
                 venue=venue,
@@ -1129,10 +1324,40 @@ def process_live_paper_session(
             if exit_depth_pit is not None and exit_fill is not None:
                 exit_fill = _label_depth_pit_fallback(exit_fill, exit_depth_pit)
             if exit_fill is None or exit_fill.fill_qty <= 0:
+                exit_audits.append(
+                    _exit_attempt_audit(
+                        m,
+                        requested_qty=remaining_qty,
+                        market_usable=True,
+                        execution_mode=execution_mode,
+                        attempted=True,
+                        fill_qty=None if exit_fill is None else exit_fill.fill_qty,
+                        fill_price=None if exit_fill is None else exit_fill.fill_price,
+                        no_fill_reason="no_simulated_fill" if exit_fill is None else exit_fill.status.value,
+                        outcome="unfilled",
+                        pit=exit_depth_pit,
+                        pit_evaluated=True,
+                    )
+                )
                 continue
 
             sold_qty = min(exit_fill.fill_qty, remaining_qty)
             if sold_qty <= 0 or remaining_qty <= 0:
+                exit_audits.append(
+                    _exit_attempt_audit(
+                        m,
+                        requested_qty=remaining_qty,
+                        market_usable=True,
+                        execution_mode=execution_mode,
+                        attempted=True,
+                        fill_qty=exit_fill.fill_qty,
+                        fill_price=exit_fill.fill_price,
+                        no_fill_reason=exit_fill.status.value,
+                        outcome="unfilled",
+                        pit=exit_depth_pit,
+                        pit_evaluated=True,
+                    )
+                )
                 continue
             scale = sold_qty / exit_fill.fill_qty if exit_fill.fill_qty > 0 else Decimal("0")
             proceeds = require_finite_controlled(exit_fill.notional * scale, name="exit_proceeds")
@@ -1151,6 +1376,19 @@ def process_live_paper_session(
             )
             if exit_fill_id in seen_fills:
                 duplicate_count += 1
+                exit_audits.append(
+                    _exit_attempt_audit(
+                        m,
+                        requested_qty=remaining_qty,
+                        market_usable=True,
+                        execution_mode=execution_mode,
+                        attempted=True,
+                        no_fill_reason="duplicate_fill_identity",
+                        outcome="duplicate_fill_identity",
+                        pit=exit_depth_pit,
+                        pit_evaluated=True,
+                    )
+                )
                 continue
 
             if fully_closed and sold_qty == exit_fill.fill_qty:
@@ -1183,6 +1421,20 @@ def process_live_paper_session(
                 )
             )
             seen_fills.add(exit_fill_id)
+            exit_audits.append(
+                _exit_attempt_audit(
+                    m,
+                    requested_qty=remaining_qty,
+                    market_usable=True,
+                    execution_mode=execution_mode,
+                    attempted=True,
+                    fill_qty=sold_qty,
+                    fill_price=exit_fill.fill_price,
+                    outcome="filled" if fully_closed else "partial",
+                    pit=exit_depth_pit,
+                    pit_evaluated=True,
+                )
+            )
             pnl = ledger.apply_exit(
                 proceeds=proceeds,
                 fee=fee,
@@ -1209,6 +1461,11 @@ def process_live_paper_session(
                 halted = True
                 halt_reason = LivePaperRejectReason.DAILY_LOSS_HALT
 
+        exit_diagnostics = build_exit_diagnostics(
+            exit_deadline=exit_deadline,
+            audits=exit_audits,
+            remaining_qty=remaining_qty,
+        )
         if remaining_qty > 0 and not any_exit:
             lifecycle = transition_position(lifecycle, "fail_exit")
             ledger.failed_count += 1
@@ -1229,6 +1486,7 @@ def process_live_paper_session(
                     remaining_cost_basis=remaining_cost,
                     entry_time=decision_time,
                     holding_period=holding_period,
+                    exit_diagnostics=exit_diagnostics,
                 )
             )
             continue
@@ -1261,6 +1519,7 @@ def process_live_paper_session(
                 entry_time=decision_time,
                 exit_time=last_exit_time if remaining_qty <= 0 else None,
                 holding_period=holding_period,
+                exit_diagnostics=exit_diagnostics,
             )
         )
 

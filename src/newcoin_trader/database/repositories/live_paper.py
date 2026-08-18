@@ -10,7 +10,7 @@ from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from newcoin_trader.database.models import LivePaperPosition, LivePaperSession, LivePaperSignal
-from newcoin_trader.domain.live_paper import LivePaperReport, LivePaperStatus
+from newcoin_trader.domain.live_paper import LivePaperReport, LivePaperStatus, PaperPositionRecord
 
 
 class LivePaperRepository:
@@ -37,6 +37,30 @@ class LivePaperRepository:
             "seen_fills": sorted(prior_fills | current_fills),
             "realized_pnl": realized,
         }
+
+    @staticmethod
+    def position_meta_json(position: PaperPositionRecord) -> dict[str, Any]:
+        meta: dict[str, Any] = {
+            "label": position.label,
+            "remaining_qty": str(position.remaining_qty) if position.remaining_qty is not None else None,
+            "remaining_cost_basis": str(position.remaining_cost_basis)
+            if position.remaining_cost_basis is not None
+            else None,
+        }
+        diag = position.exit_diagnostics
+        if diag is None:
+            return meta
+        meta["failed_exit_reason"] = diag.failed_exit_reason.value if diag.failed_exit_reason else None
+        meta["exit_deadline"] = diag.exit_deadline.isoformat()
+        meta["exit_attempt_audits"] = [audit.model_dump(mode="json") for audit in diag.attempts]
+        meta["exit_attempt_count_total"] = diag.attempt_count_total
+        meta["exit_attempt_count_retained"] = diag.attempt_count_retained
+        meta["exit_attempt_audits_truncated"] = diag.truncated
+        if diag.last_candidate_clock is not None:
+            meta["last_candidate_clock"] = diag.last_candidate_clock.isoformat()
+        if diag.last_reject_or_nofill_reason is not None:
+            meta["last_reject_or_nofill_reason"] = diag.last_reject_or_nofill_reason
+        return meta
 
     async def load_session_state(
         self,
@@ -127,13 +151,7 @@ class LivePaperRepository:
                     realized_pnl=position.realized_pnl,
                     entry_time=position.entry_time,
                     exit_time=position.exit_time,
-                    meta_json={
-                        "label": position.label,
-                        "remaining_qty": str(position.remaining_qty) if position.remaining_qty is not None else None,
-                        "remaining_cost_basis": str(position.remaining_cost_basis)
-                        if position.remaining_cost_basis is not None
-                        else None,
-                    },
+                    meta_json=self.position_meta_json(position),
                 )
                 .on_conflict_do_update(
                     constraint="uq_live_paper_positions_session_position",
@@ -143,15 +161,7 @@ class LivePaperRepository:
                         "exit_price": position.exit_price,
                         "realized_pnl": position.realized_pnl,
                         "exit_time": position.exit_time,
-                        "meta_json": {
-                            "label": position.label,
-                            "remaining_qty": str(position.remaining_qty)
-                            if position.remaining_qty is not None
-                            else None,
-                            "remaining_cost_basis": str(position.remaining_cost_basis)
-                            if position.remaining_cost_basis is not None
-                            else None,
-                        },
+                        "meta_json": self.position_meta_json(position),
                     },
                 )
             )

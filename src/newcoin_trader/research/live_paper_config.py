@@ -42,6 +42,7 @@ MAX_TRADES_MAX = 100_000
 QUEUE_CAPACITY_MIN = 1
 QUEUE_CAPACITY_MAX = 1_000_000
 DURATION_MAX = timedelta(days=7)
+MAX_EXIT_ATTEMPT_AUDITS = 8
 
 ELIGIBILITY_RULES: tuple[str, ...] = (
     "phase6_paper_only_no_real_orders",
@@ -119,6 +120,7 @@ __all__ = [
     "DEFAULT_SESSION_LOSS_LIMIT",
     "DURATION_MAX",
     "ELIGIBILITY_RULES",
+    "MAX_EXIT_ATTEMPT_AUDITS",
     "MAX_SIGNALS_MAX",
     "MAX_SIGNALS_MIN",
     "MAX_TRADES_MAX",

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from newcoin_trader.domain.live_paper import LivePaperReport, PaperFillRecord, PaperSignalRecord
+from newcoin_trader.domain.live_paper import LivePaperReport, PaperFillRecord, PaperPositionRecord, PaperSignalRecord
 from newcoin_trader.reports.schemas import to_jsonable
 from newcoin_trader.reports.writers import write_csv, write_json
 from newcoin_trader.research.event_study_config import format_duration
@@ -45,6 +45,15 @@ FILL_CSV_COLUMNS = [
     "impact_cost",
     "label",
     "source",
+]
+
+FAILED_EXIT_CSV_COLUMNS = [
+    "position_id",
+    "exit_deadline",
+    "failed_exit_reason",
+    "attempt_count",
+    "last_candidate_clock",
+    "last_reject_or_nofill_reason",
 ]
 
 
@@ -90,6 +99,35 @@ def _fill_row(fill: PaperFillRecord) -> dict[str, object]:
     }
 
 
+def _failed_exit_positions(report: LivePaperReport) -> tuple[PaperPositionRecord, ...]:
+    return tuple(
+        position
+        for position in report.positions
+        if position.exit_diagnostics is not None and position.exit_diagnostics.failed_exit_reason is not None
+    )
+
+
+def _failed_exit_row(position: PaperPositionRecord) -> dict[str, object]:
+    diag = position.exit_diagnostics
+    if diag is None:
+        return {
+            "position_id": position.position_id,
+            "exit_deadline": None,
+            "failed_exit_reason": None,
+            "attempt_count": 0,
+            "last_candidate_clock": None,
+            "last_reject_or_nofill_reason": None,
+        }
+    return {
+        "position_id": position.position_id,
+        "exit_deadline": diag.exit_deadline.isoformat(),
+        "failed_exit_reason": diag.failed_exit_reason.value if diag.failed_exit_reason else None,
+        "attempt_count": diag.attempt_count_total,
+        "last_candidate_clock": diag.last_candidate_clock.isoformat() if diag.last_candidate_clock else None,
+        "last_reject_or_nofill_reason": diag.last_reject_or_nofill_reason,
+    }
+
+
 def _markdown(report: LivePaperReport) -> str:
     meta = report.meta
     port = report.portfolio
@@ -132,6 +170,21 @@ def _markdown(report: LivePaperReport) -> str:
     )
     for key, value in sorted(report.data_quality.items()):
         lines.append(f"- {key}: {value}")
+    lines.extend(["", "## Failed exits", ""])
+    failed = _failed_exit_positions(report)
+    if not failed:
+        lines.append("none")
+    else:
+        for position in failed:
+            diag = position.exit_diagnostics
+            if diag is None or diag.failed_exit_reason is None:
+                continue
+            last_clock = diag.last_candidate_clock.isoformat() if diag.last_candidate_clock else "none"
+            last_reason = diag.last_reject_or_nofill_reason or "none"
+            lines.append(
+                f"- position_id: `{position.position_id}` reason: `{diag.failed_exit_reason.value}` "
+                f"attempts: {diag.attempt_count_total} last_clock: {last_clock} last_reason: {last_reason}"
+            )
     if report.comparison:
         lines.extend(["", "## Comparison (Phase4 gross / Phase5 net / Phase6 paper)", ""])
         for key, value in sorted(report.comparison.items()):
@@ -155,6 +208,18 @@ def emit_live_paper_artifacts(report: LivePaperReport, output_dir: Path) -> dict
         fill_rows,
         fieldnames=FILL_CSV_COLUMNS,
     )
+    failed_exit_rows = [_failed_exit_row(position) for position in _failed_exit_positions(report)]
+    failed_exits_csv = write_csv(
+        output_dir / "live_paper_failed_exits.csv",
+        failed_exit_rows,
+        fieldnames=FAILED_EXIT_CSV_COLUMNS,
+    )
     md_path = output_dir / "live_paper_summary.md"
     md_path.write_text(_markdown(report), encoding="utf-8")
-    return {"json": json_path, "csv": csv_path, "fills_csv": fills_csv, "markdown": md_path}
+    return {
+        "json": json_path,
+        "csv": csv_path,
+        "fills_csv": fills_csv,
+        "failed_exits_csv": failed_exits_csv,
+        "markdown": md_path,
+    }
