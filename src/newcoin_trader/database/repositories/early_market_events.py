@@ -1,7 +1,8 @@
-"""Phase 8A.2 early-market-event persistence repository."""
+"""Phase 8A.2 early-market-event persistence repository (+ 8A.3 bounded reads)."""
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal
 from typing import Any
@@ -55,6 +56,15 @@ def _require_native_id(value: str, *, field: str) -> str:
     if not isinstance(value, str) or not value.strip():
         raise ValueError(f"{field} is required and must be a non-empty source-native id")
     return value
+
+
+@dataclass(frozen=True, slots=True)
+class EarlyMarketEventAssociation:
+    """Exact persisted event + token + optional market (no symbol lookup)."""
+
+    event: EarlyMarketEventRecord
+    token: Token
+    market: Market | None
 
 
 class EarlyMarketEventRepository:
@@ -273,3 +283,73 @@ class EarlyMarketEventRepository:
             .limit(bound)
         )
         return list(result.all())
+
+    async def list_associated_events(
+        self,
+        *,
+        start: datetime,
+        end: datetime,
+        limit: int,
+    ) -> list[EarlyMarketEventAssociation]:
+        """Bounded chronological events with exact token + optional market association.
+
+        Ordering is ``source_event_time, id``. Fetches ``limit + 1`` and raises on overflow.
+        Never resolves markets by symbol or by picking an arbitrary pool.
+        """
+        bound = _require_bound(limit)
+        start_utc = require_utc(start)
+        end_utc = require_utc(end)
+        if end_utc <= start_utc:
+            raise ValueError("end must be after start")
+
+        result = await self._session.execute(
+            select(EarlyMarketEventRecord, Token, Market)
+            .join(Token, Token.id == EarlyMarketEventRecord.asset_token_id)
+            .outerjoin(Market, Market.id == EarlyMarketEventRecord.market_id)
+            .where(
+                EarlyMarketEventRecord.source_event_time >= start_utc,
+                EarlyMarketEventRecord.source_event_time < end_utc,
+            )
+            .order_by(EarlyMarketEventRecord.source_event_time, EarlyMarketEventRecord.id)
+            .limit(bound + 1)
+        )
+        rows = list(result.all())
+        if len(rows) > bound:
+            raise ValueError(f"associated event read overflow: more than {bound} rows in window")
+        return [EarlyMarketEventAssociation(event=event, token=token, market=market) for event, token, market in rows]
+
+    async def list_observations_for_market(
+        self,
+        *,
+        market_id: int,
+        start: datetime,
+        end: datetime,
+        limit: int,
+    ) -> list[EarlyMarketObservation]:
+        """Bounded chronological observations for one explicit market id + time range.
+
+        Ordering is ``source_time, id``. Fetches ``limit + 1`` and raises on overflow.
+        Never aggregates across markets.
+        """
+        if not isinstance(market_id, int) or isinstance(market_id, bool) or market_id <= 0:
+            raise ValueError("market_id must be a positive integer")
+        bound = _require_bound(limit)
+        start_utc = require_utc(start)
+        end_utc = require_utc(end)
+        if end_utc < start_utc:
+            raise ValueError("end must be at or after start")
+
+        result = await self._session.scalars(
+            select(EarlyMarketObservation)
+            .where(
+                EarlyMarketObservation.market_id == market_id,
+                EarlyMarketObservation.source_time >= start_utc,
+                EarlyMarketObservation.source_time <= end_utc,
+            )
+            .order_by(EarlyMarketObservation.source_time, EarlyMarketObservation.id)
+            .limit(bound + 1)
+        )
+        rows = list(result.all())
+        if len(rows) > bound:
+            raise ValueError(f"market observation read overflow: more than {bound} rows for market_id={market_id}")
+        return rows
