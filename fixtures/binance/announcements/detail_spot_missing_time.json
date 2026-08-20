@@ -1,0 +1,12 @@
+{
+  "code": "000000",
+  "message": null,
+  "data": {
+    "id": 109,
+    "code": "spot-missing-time",
+    "title": "Binance Will Open Trading for LATE/USDT Spot Trading Pair",
+    "type": 1,
+    "releaseDate": 1705122000000,
+    "body": "<p>Binance will open trading for LATE/USDT Spot Trading Pair. Exact opening time will be announced later.</p>"
+  }
+}

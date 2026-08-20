@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from typing import Any, Protocol
 
 import httpx
@@ -42,6 +42,20 @@ class GetJsonClient(Protocol):
     async def aclose(self) -> None: ...
 
 
+class GetBytesClient(Protocol):
+    """Collector-facing transport: bytes GET only (e.g. Binance Vision zip files)."""
+
+    async def get_bytes(
+        self,
+        url: str,
+        *,
+        params: Mapping[str, Any] | None = None,
+        headers: Mapping[str, str] | None = None,
+    ) -> bytes: ...
+
+    async def aclose(self) -> None: ...
+
+
 class AsyncHttpClient:
     """Concrete GET-only HTTP client used by all market-data collectors."""
 
@@ -53,6 +67,7 @@ class AsyncHttpClient:
         max_attempts: int = 4,
         backoff_seconds: float = 0.25,
         rate_limit_per_second: float = 8.0,
+        rate_limit_429_cooldowns: Sequence[float] | None = None,
         headers: Mapping[str, str] | None = None,
         sleep: SleepFn = asyncio.sleep,
         client: httpx.AsyncClient | None = None,
@@ -66,6 +81,9 @@ class AsyncHttpClient:
         )
         self._max_attempts = max_attempts
         self._backoff_seconds = backoff_seconds
+        self._rate_limit_429_cooldowns = (
+            tuple(rate_limit_429_cooldowns) if rate_limit_429_cooldowns is not None else None
+        )
         self._sleep = sleep
         self._limiter = AsyncRateLimiter(
             rate_per_second=rate_limit_per_second,
@@ -88,6 +106,16 @@ class AsyncHttpClient:
             return response.json()
         except ValueError as exc:
             raise ParseError(f"invalid JSON from {url}") from exc
+
+    async def get_bytes(
+        self,
+        url: str,
+        *,
+        params: Mapping[str, Any] | None = None,
+        headers: Mapping[str, str] | None = None,
+    ) -> bytes:
+        response = await self._get(url, params=params, headers=headers)
+        return bytes(response.content)
 
     async def _get(
         self,
@@ -119,7 +147,13 @@ class AsyncHttpClient:
                 raise NotFoundError(f"404 for {url}")
             if is_retryable_status(response.status_code):
                 retry_after = parse_retry_after(response.headers)
-                wait = retry_after if retry_after is not None else backoff_for_attempt(attempt, self._backoff_seconds)
+                if response.status_code == 429 and retry_after is None and self._rate_limit_429_cooldowns:
+                    idx = min(attempt - 1, len(self._rate_limit_429_cooldowns) - 1)
+                    wait = self._rate_limit_429_cooldowns[idx]
+                else:
+                    wait = (
+                        retry_after if retry_after is not None else backoff_for_attempt(attempt, self._backoff_seconds)
+                    )
                 if response.status_code == 429:
                     last_error = RateLimitError(
                         f"429 for {url}",

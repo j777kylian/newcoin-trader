@@ -1,0 +1,78 @@
+{
+  "code": "000000",
+  "message": null,
+  "data": {
+    "catalogs": [
+      {
+        "catalogId": 48,
+        "catalogName": "New Cryptocurrency Listing",
+        "total": 2231,
+        "articles": [
+          {
+            "id": 101,
+            "code": "spot-new-explicit",
+            "title": "Binance Will Open Trading for NEW/USDT, NEW/USDC Spot Trading Pairs at 2024-01-15 08:00 (UTC)",
+            "type": 1,
+            "releaseDate": 1705233600000
+          },
+          {
+            "id": 102,
+            "code": "futures-perp",
+            "title": "Binance Futures Will Launch USDⓈ-M OLDUSDT Perpetual Contract With Up to 50x Leverage",
+            "type": 1,
+            "releaseDate": 1705230000000
+          },
+          {
+            "id": 103,
+            "code": "margin-add",
+            "title": "Binance Will Add ABC on Isolated Margin and Cross Margin",
+            "type": 1,
+            "releaseDate": 1705226400000
+          },
+          {
+            "id": 104,
+            "code": "spot-will-list",
+            "title": "Binance Will List Newcoin (NEW)",
+            "type": 1,
+            "releaseDate": 1705140000000
+          },
+          {
+            "id": 105,
+            "code": "alpha-list",
+            "title": "Binance Alpha Will List Mystery Token (MYST)",
+            "type": 1,
+            "releaseDate": 1705136400000
+          },
+          {
+            "id": 106,
+            "code": "collateral",
+            "title": "Binance Will List XYZ as a New Collateral Asset on Portfolio Margin",
+            "type": 1,
+            "releaseDate": 1705132800000
+          },
+          {
+            "id": 107,
+            "code": "delist",
+            "title": "Binance Will Delist XYZUSDT and Remove Spot Trading Pairs",
+            "type": 1,
+            "releaseDate": 1705129200000
+          },
+          {
+            "id": 108,
+            "code": "ambiguous-other",
+            "title": "Important Notice Regarding New Cryptocurrency Listing Process",
+            "type": 1,
+            "releaseDate": 1705125600000
+          },
+          {
+            "id": 109,
+            "code": "spot-missing-time",
+            "title": "Binance Will Open Trading for LATE/USDT Spot Trading Pair",
+            "type": 1,
+            "releaseDate": 1705122000000
+          }
+        ]
+      }
+    ]
+  }
+}

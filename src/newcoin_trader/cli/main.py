@@ -8,6 +8,17 @@ from pathlib import Path
 import typer
 from sqlalchemy.exc import OperationalError
 
+from newcoin_trader.collectors.binance.announcements import (
+    DEFAULT_PAGE_SIZE,
+    MAX_ARTICLES_CAP,
+    MAX_PAGES_CAP,
+    BinanceAnnouncementClient,
+    create_cms_http_client,
+    validate_collect_bounds,
+)
+from newcoin_trader.collectors.binance.client import BinanceClient
+from newcoin_trader.collectors.binance.vision import BinanceVisionClient
+from newcoin_trader.collectors.http import AsyncHttpClient
 from newcoin_trader.config import load_settings
 from newcoin_trader.demo import run_offline_smoke
 from newcoin_trader.domain.executable_backtest import FrozenCandidateIdentity
@@ -58,6 +69,9 @@ from newcoin_trader.research.feature_research_config import (
     parse_split_ratios,
     validate_feature_research_bounds,
 )
+from newcoin_trader.research.listing_cohort_config import clamp_research_end, validate_listing_cohort_bounds
+from newcoin_trader.research.listing_cohort_ingestion import validate_binance_limit
+from newcoin_trader.research.listing_cohort_run import run_listing_cohort_pilot
 from newcoin_trader.research.live_paper_config import (
     DEFAULT_POSITION_NOTIONAL as LP_DEFAULT_NOTIONAL,
 )
@@ -873,6 +887,103 @@ def live_paper(
                     )
         except OperationalError as exc:
             raise ConfigError("DATABASE_URL is unavailable for live-paper persistence") from exc
+
+    try:
+        asyncio.run(_run())
+    except ConfigError as exc:
+        typer.secho(str(exc), fg=typer.colors.RED, err=True)
+        raise typer.Exit(2) from exc
+    except ValueError as exc:
+        typer.secho(str(exc), fg=typer.colors.RED, err=True)
+        raise typer.Exit(2) from exc
+
+
+@app.command("listing-cohort-pilot")
+def listing_cohort_pilot(
+    requested_start: str = typer.Option(..., help="Inclusive UTC ISO start for announcement publication window"),
+    requested_end: str = typer.Option(..., help="Exclusive UTC ISO end for announcement publication window"),
+    output_dir: Path = typer.Option(
+        Path("artifacts/listing_cohort"),
+        help="Directory for Phase 8.1 artifacts A–H",
+    ),
+    max_articles: int = typer.Option(MAX_ARTICLES_CAP, help="Hard cap on CMS articles scanned (1–2000)"),
+    max_pages: int = typer.Option(MAX_PAGES_CAP, help="Hard cap on CMS list pages (1–100)"),
+    max_probe_days: int = typer.Option(2, help="Vision earliest-file probe days (1–31)"),
+    binance_limit: int = typer.Option(
+        500,
+        help="Bounded Binance Spot klines/aggTrades page size (1–1000)",
+    ),
+) -> None:
+    """Bounded Phase 8.1 listing-cohort pilot (gross research; GET-only; no live trading).
+
+    Selects the 50 most recent genuine Binance Spot new-crypto-asset listings via bounded
+    backward pagination of catalog 48 (1095-day / 3-year maximum lookback). Research end is
+    clamped to actual current UTC. Request/page/record controls are validated before any HTTP work.
+    """
+    from datetime import UTC, datetime
+
+    try:
+        start_dt = parse_cli_datetime(requested_start)
+        end_dt = parse_cli_datetime(requested_end)
+        now_utc = datetime.now(UTC)
+        effective_end = clamp_research_end(requested_end=end_dt, now_utc=now_utc)
+        validate_listing_cohort_bounds(
+            start=start_dt,
+            end=end_dt,
+            max_probe_days=max_probe_days,
+            lookback_before_days=0,
+        )
+        validate_listing_cohort_bounds(
+            start=start_dt,
+            end=effective_end,
+            max_probe_days=max_probe_days,
+            lookback_before_days=0,
+        )
+        validate_collect_bounds(max_pages=max_pages, max_articles=max_articles, page_size=DEFAULT_PAGE_SIZE)
+        validate_binance_limit(binance_limit)
+    except ConfigError as exc:
+        typer.secho(str(exc), fg=typer.colors.RED, err=True)
+        raise typer.Exit(2) from exc
+    except ValueError as exc:
+        typer.secho(str(exc), fg=typer.colors.RED, err=True)
+        raise typer.Exit(2) from exc
+
+    async def _run() -> None:
+        settings = load_settings()
+        cms_http = create_cms_http_client(
+            timeout_seconds=settings.http_timeout_seconds,
+            backoff_seconds=settings.http_backoff_seconds,
+        )
+        market_http = AsyncHttpClient(
+            timeout_seconds=settings.http_timeout_seconds,
+            max_attempts=settings.http_max_attempts,
+            backoff_seconds=settings.http_backoff_seconds,
+            rate_limit_per_second=settings.http_rate_limit_per_second,
+        )
+        try:
+            report = await run_listing_cohort_pilot(
+                announcement_client=BinanceAnnouncementClient(http=cms_http),
+                vision_client=BinanceVisionClient(http=market_http),
+                market_history=BinanceClient(http=market_http, base_url=settings.binance_base_url),
+                output_dir=output_dir,
+                requested_start=start_dt,
+                requested_end=end_dt,
+                max_pages=max_pages,
+                max_articles=max_articles,
+                page_size=DEFAULT_PAGE_SIZE,
+                max_probe_days=max_probe_days,
+                binance_limit=binance_limit,
+                now_utc=now_utc,
+            )
+            typer.echo(
+                "listing-cohort-pilot complete: "
+                f"cohort={report.cohort_count} exclusions={report.exclusion_count} "
+                f"events={report.event_study_event_count} features={report.feature_record_count} "
+                f"output_dir={output_dir}"
+            )
+        finally:
+            await cms_http.aclose()
+            await market_http.aclose()
 
     try:
         asyncio.run(_run())

@@ -1,0 +1,71 @@
+{
+  "aero_spot_plus_alpha_delist": {
+    "title": "Binance Will List Aerodrome Finance (AERO)",
+    "body": "Binance will list Aerodrome Finance (AERO) and open trading for the following spot trading pairs at 2024-10-17 12:00 (UTC):\nAERO/USDT\nAERO/USDC\nAERO/BNB\nAERO/FDUSD\nAERO/TRY\n\nAERO will be delisted from Binance Alpha when spot trading opens. Alpha users should manage their positions."
+  },
+  "spot_delist": {
+    "title": "Binance Will Delist XYZUSDT and Remove Spot Trading Pairs",
+    "body": "Binance will delist XYZ/USDT and XYZ/BTC Spot Trading Pairs at 2024-03-01 08:00 (UTC). Users should cancel open orders."
+  },
+  "futures_launch": {
+    "title": "Binance Futures Will Launch USDⓈ-M OLDUSDT Perpetual Contract With Up to 50x Leverage",
+    "body": "Binance Futures will launch the USD-M OLDUSDT perpetual contract at 2024-02-01 08:00 (UTC)."
+  },
+  "collateral_addition": {
+    "title": "Binance Will List XYZ as a New Collateral Asset on Portfolio Margin",
+    "body": "XYZ will be added as collateral on Portfolio Margin. This is not a Spot listing."
+  },
+  "pair_addition_already_listed": {
+    "title": "Binance Will Add OLD/FDUSD Spot Trading Pair",
+    "body": "Binance will add the OLD/FDUSD spot trading pair at 2024-01-15 08:00 (UTC). OLD is already listed on Binance Spot."
+  },
+  "usd1_try_pair_addition_already_listed": {
+    "title": "Binance Will Add USD1/TRY Trading Pair",
+    "body": "Binance will add the USD1/TRY spot trading pair at 2026-08-18 08:00 (UTC). USD1 is already listed on Binance Spot and this is an additional trading pair."
+  },
+  "newtoken_multi_pair_first_listing": {
+    "title": "Binance Will List New Token (NEWTOKEN)",
+    "body": "Binance will list New Token (NEWTOKEN) and open trading for the following spot trading pairs at 2026-08-18 08:00 (UTC):\nNEWTOKEN/USDT\nNEWTOKEN/TRY"
+  },
+  "stablecoin_first_listing_includable": {
+    "title": "Binance Will List Test Stable (USDX)",
+    "body": "Binance will list Test Stable (USDX) and open trading for the following spot trading pairs at 2026-08-18 08:00 (UTC):\nUSDX/USDT"
+  },
+  "bstocks": [
+    {
+      "code": "bstock-tslax",
+      "title": "Binance Will List Tesla Tokenized Stock (TSLAx) on bStocks",
+      "body": "Binance will list Tesla tokenized stock (TSLAx) bStock. Subscription starts 2025-07-01 10:00 (UTC). Spot trading opens 2025-07-03 14:00 (UTC)."
+    },
+    {
+      "code": "bstock-aaplx",
+      "title": "Binance Will List Apple Tokenized Stock (AAPLx)",
+      "body": "This bStock is a tokenized security. Subscription 2025-07-02 10:00 (UTC). Trading 2025-07-04 14:00 (UTC)."
+    },
+    {
+      "code": "bstock-amznx",
+      "title": "Binance Will List Amazon Tokenized Stock (AMZNx)",
+      "body": "AMZNx is a tokenized security issued by BTech. Subscription 2025-07-03 10:00 (UTC). Trading 2025-07-05 14:00 (UTC)."
+    },
+    {
+      "code": "bstock-googlx",
+      "title": "Binance Will List Alphabet Tokenized Stock (GOOGLx)",
+      "body": "GOOGLx tokenized securities issued under FSRA. Subscription 2025-07-04 10:00 (UTC). Trading 2025-07-06 14:00 (UTC)."
+    },
+    {
+      "code": "bstock-nvdax",
+      "title": "Binance Will List NVIDIA Tokenized Stock (NVDAx)",
+      "body": "NVDAx tokenized securities in ADGM. Subscription 2025-07-05 10:00 (UTC). Trading 2025-07-07 14:00 (UTC)."
+    },
+    {
+      "code": "bstock-metax",
+      "title": "Binance Will List Meta Tokenized Stock (METAx) bStocks",
+      "body": "METAx bStocks issued by BTech, FSRA, ADGM. Subscription 2025-07-06 10:00 (UTC). Trading 2025-07-08 14:00 (UTC)."
+    },
+    {
+      "code": "bstock-msftx",
+      "title": "Binance Will List Microsoft Tokenized Stock (MSFTx)",
+      "body": "MSFTx is a tokenized security (bStock). Subscription 2025-07-07 10:00 (UTC). Trading 2025-07-09 14:00 (UTC)."
+    }
+  ]
+}

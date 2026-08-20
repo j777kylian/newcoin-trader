@@ -1,0 +1,14 @@
+{
+  "code": "000000",
+  "message": null,
+  "data": {
+    "catalogs": [
+      {
+        "catalogId": 48,
+        "catalogName": "New Cryptocurrency Listing",
+        "total": 2231,
+        "articles": []
+      }
+    ]
+  }
+}

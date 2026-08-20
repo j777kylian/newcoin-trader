@@ -1,0 +1,22 @@
+{
+  "code": "000000",
+  "message": null,
+  "data": {
+    "catalogs": [
+      {
+        "catalogId": 48,
+        "catalogName": "New Cryptocurrency Listing",
+        "total": 2231,
+        "articles": [
+          {
+            "id": 201,
+            "code": "spot-page2",
+            "title": "Binance Will Open Trading for PAGE/USDT Spot Trading Pair at 2024-01-20 10:00 (UTC)",
+            "type": 1,
+            "releaseDate": 1705665600000
+          }
+        ]
+      }
+    ]
+  }
+}
