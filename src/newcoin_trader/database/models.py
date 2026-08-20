@@ -292,3 +292,146 @@ class LivePaperPosition(Base):
         nullable=False,
         server_default=func.now(),
     )
+
+
+class Market(Base):
+    """Durable market / pool / pair identity (never symbol-only)."""
+
+    __tablename__ = "markets"
+    __table_args__ = (
+        UniqueConstraint("market_key", name="uq_markets_market_key"),
+        Index("ix_markets_base_token_id", "base_token_id"),
+        Index("ix_markets_base_token_pool", "base_token_id", "pool_or_pair_address"),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    market_key: Mapped[str] = mapped_column(Text, nullable=False)
+    base_token_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("tokens.id", ondelete="CASCADE"), nullable=False)
+    quote_token_id: Mapped[int | None] = mapped_column(
+        BigInteger, ForeignKey("tokens.id", ondelete="SET NULL"), nullable=True
+    )
+    pool_or_pair_address: Mapped[str | None] = mapped_column(Text, nullable=True)
+    venue: Mapped[str] = mapped_column(Text, nullable=False)
+    symbol: Mapped[str | None] = mapped_column(Text, nullable=True)
+    source_native_market_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    market_kind: Mapped[str] = mapped_column(Text, nullable=False)
+    identity_status: Mapped[str] = mapped_column(Text, nullable=False)
+    source: Mapped[str] = mapped_column(Text, nullable=False)
+    metadata_json: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
+    provenance_json: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+    )
+
+
+class EarlyMarketEventRecord(Base):
+    """Persistent early-market event row; idempotent by source + native event id."""
+
+    __tablename__ = "early_market_events"
+    __table_args__ = (
+        UniqueConstraint(
+            "source",
+            "source_native_event_id",
+            name="uq_early_market_events_source_native_id",
+        ),
+        Index("ix_early_market_events_source_event_time_id", "source_event_time", "id"),
+        Index("ix_early_market_events_asset_token_id", "asset_token_id"),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    source_native_event_id: Mapped[str] = mapped_column(Text, nullable=False)
+    source: Mapped[str] = mapped_column(Text, nullable=False)
+    event_kind: Mapped[str] = mapped_column(Text, nullable=False)
+    event_definition_version: Mapped[str] = mapped_column(Text, nullable=False)
+    venue_or_protocol: Mapped[str] = mapped_column(Text, nullable=False)
+    chain: Mapped[str] = mapped_column(Text, nullable=False)
+    asset_token_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("tokens.id", ondelete="CASCADE"), nullable=False)
+    market_id: Mapped[int | None] = mapped_column(
+        BigInteger, ForeignKey("markets.id", ondelete="SET NULL"), nullable=True
+    )
+    source_event_time: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    received_time: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    decision_available_time: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    first_market_data_time: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    first_liquidity_time: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    first_trade_time: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    event_time_semantics: Mapped[str] = mapped_column(Text, nullable=False)
+    event_quality_status: Mapped[str] = mapped_column(Text, nullable=False)
+    event_clock_quality: Mapped[str] = mapped_column(Text, nullable=False)
+    provenance_ref: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+    )
+
+
+class EarlyMarketEventEvidence(Base):
+    """Append-only evidence rows linked to a persisted early-market event."""
+
+    __tablename__ = "early_market_event_evidence"
+    __table_args__ = (
+        Index("ix_early_market_event_evidence_event_id", "event_id"),
+        Index("ix_early_market_event_evidence_observed_time_id", "observed_time", "id"),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    event_id: Mapped[int] = mapped_column(
+        BigInteger, ForeignKey("early_market_events.id", ondelete="CASCADE"), nullable=False
+    )
+    evidence_kind: Mapped[str] = mapped_column(Text, nullable=False)
+    source: Mapped[str] = mapped_column(Text, nullable=False)
+    source_native_evidence_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    observed_time: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    received_time: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    endpoint: Mapped[str | None] = mapped_column(Text, nullable=True)
+    dataset: Mapped[str | None] = mapped_column(Text, nullable=True)
+    stable_locator: Mapped[str | None] = mapped_column(Text, nullable=True)
+    status: Mapped[str] = mapped_column(Text, nullable=False)
+    payload_metadata: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+    )
+
+
+class EarlyMarketObservation(Base):
+    """Persistent market observation with explicit availability semantics."""
+
+    __tablename__ = "early_market_observations"
+    __table_args__ = (
+        UniqueConstraint(
+            "source",
+            "source_native_observation_id",
+            name="uq_early_market_observations_source_native_id",
+        ),
+        Index("ix_early_market_observations_source_time_id", "source_time", "id"),
+        Index("ix_early_market_observations_market_id", "market_id"),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    market_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("markets.id", ondelete="CASCADE"), nullable=False)
+    event_id: Mapped[int | None] = mapped_column(
+        BigInteger, ForeignKey("early_market_events.id", ondelete="SET NULL"), nullable=True
+    )
+    source_native_observation_id: Mapped[str] = mapped_column(Text, nullable=False)
+    source: Mapped[str] = mapped_column(Text, nullable=False)
+    source_time: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    received_time: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    availability_status: Mapped[str] = mapped_column(Text, nullable=False)
+    price: Mapped[Decimal | None] = mapped_column(NUMERIC, nullable=True)
+    quantity: Mapped[Decimal | None] = mapped_column(NUMERIC, nullable=True)
+    liquidity: Mapped[Decimal | None] = mapped_column(NUMERIC, nullable=True)
+    base_reserve: Mapped[Decimal | None] = mapped_column(NUMERIC, nullable=True)
+    quote_reserve: Mapped[Decimal | None] = mapped_column(NUMERIC, nullable=True)
+    side: Mapped[str | None] = mapped_column(Text, nullable=True)
+    resolution: Mapped[str | None] = mapped_column(Text, nullable=True)
+    provenance_json: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+    )
