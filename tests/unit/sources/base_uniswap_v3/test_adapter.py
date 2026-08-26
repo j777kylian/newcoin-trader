@@ -1167,6 +1167,63 @@ def test_normalize_historical_swap_point_uses_base_usdc_and_source_time_only() -
     assert observation.quote_policy_version == "base_usdc_quote_v1"
 
 
+@pytest.mark.parametrize("wrong_side", ["token0", "token1", "both"])
+@pytest.mark.parametrize(
+    "block_number, block_hash",
+    [
+        (CREATION_BLOCK + 1, "0x" + ("34" * 32)),
+        (CREATION_BLOCK, "0x" + ("56" * 32)),
+    ],
+)
+def test_normalize_historical_swap_point_rejects_recomputed_decimal_evidence_from_another_creation_block(
+    wrong_side: str, block_number: int, block_hash: str
+) -> None:
+    token0 = _decimals(TOKEN0, 18)
+    token1 = _decimals(TOKEN1, 6)
+    if wrong_side in {"token0", "both"}:
+        token0 = _decimals(
+            TOKEN0,
+            18,
+            evidence_block_number=block_number,
+            evidence_block_hash=block_hash,
+        )
+    if wrong_side in {"token1", "both"}:
+        token1 = _decimals(
+            TOKEN1,
+            6,
+            evidence_block_number=block_number,
+            evidence_block_hash=block_hash,
+        )
+
+    with pytest.raises(ValueError, match="decimal evidence.*PoolCreated block"):
+        normalize_historical_swap_point_observation(
+            swap_evidence=_swap_evidence(),
+            creation_evidence=_creation_evidence(),
+            token0_decimals=token0,
+            token1_decimals=token1,
+        )
+
+
+def test_normalizer_rejects_constructed_or_copied_recomputed_wrong_block_decimal_evidence() -> None:
+    wrong = _decimals(
+        TOKEN1,
+        6,
+        evidence_block_number=CREATION_BLOCK + 1,
+        evidence_block_hash="0x" + ("78" * 32),
+    )
+    constructed = TokenDecimalsEvidence.model_construct(**wrong.model_dump())
+    copied = _decimals(TOKEN1, 6).model_copy(update=wrong.model_dump())
+
+    for token1 in (constructed, copied):
+        with pytest.raises(ValueError, match="decimal evidence.*PoolCreated block"):
+            normalize_historical_swap_point_observation(
+                swap_evidence=_swap_evidence(),
+                creation_evidence=_creation_evidence(),
+                token0_decimals=_decimals(TOKEN0, 18),
+                token1_decimals=token1,
+            )
+
+
 def test_normalize_historical_swap_point_rejects_constructed_decimal_evidence() -> None:
     corrupt = TokenDecimalsEvidence.model_construct(
         chain_id=CHAIN_ID,

@@ -192,6 +192,12 @@ def normalize_historical_swap_point_observation(
         raise ValueError("decimal evidence must match canonical token0/token1 identities")
     if token0_decimals.token_address == token1_decimals.token_address:
         raise ValueError("duplicate decimal evidence token identity")
+    for decimal_evidence in (token0_decimals, token1_decimals):
+        if (
+            decimal_evidence.evidence_block_number != creation_evidence.block.number
+            or decimal_evidence.evidence_block_hash != creation_evidence.block.hash
+        ):
+            raise ValueError("decimal evidence must bind exact canonical PoolCreated block identity")
 
     quote_matches = [token for token in (creation.token0, creation.token1) if token == _BASE_USDC_ADDRESS]
     if len(quote_matches) != 1:
