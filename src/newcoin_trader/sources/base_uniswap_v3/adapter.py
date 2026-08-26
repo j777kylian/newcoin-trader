@@ -22,12 +22,16 @@ from newcoin_trader.domain.early_market_events import (
 from newcoin_trader.domain.types import require_utc
 from newcoin_trader.sources.base_uniswap_v3.models import (
     CanonicalPoolCreatedEvidence,
+    CanonicalSwapEvidence,
     FactoryPoolCreatedRecord,
     FinalityBoundary,
+    HistoricalSwapPointObservation,
     SwapLogRecord,
+    TokenDecimalsEvidence,
     VerifiedExactPoolSwapScanResult,
     VerifiedFactoryUniverse,
     assert_finality_for_block,
+    compute_raw_canonical_binding_digest,
     normalize_address,
     require_non_bool_int,
     strict_reconstruct_model,
@@ -39,6 +43,9 @@ _VENUE = "uniswap_v3"
 _SOURCE = "base_uniswap_v3"
 _EVENT_DEFINITION_VERSION = "8c.4.0"
 _AVAILABILITY_POLICY_VERSION = "8c.4.0"
+_OBSERVATION_DEFINITION_VERSION = "8c.5.0"
+_BASE_USDC_ADDRESS = "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913"
+_BASE_USDC_QUOTE_POLICY_VERSION = "base_usdc_quote_v1"
 
 
 def validate_factory_universe(universe: VerifiedFactoryUniverse) -> tuple[FactoryPoolCreatedRecord, ...]:
@@ -160,6 +167,88 @@ def compute_realized_execution_price(
     if base_qty == 0 or quote_qty == 0:
         raise ValueError("zero scaled base/quote quantity rejected")
     return quote_qty / base_qty, base, quote
+
+
+def normalize_historical_swap_point_observation(
+    *,
+    swap_evidence: CanonicalSwapEvidence,
+    creation_evidence: CanonicalPoolCreatedEvidence,
+    token0_decimals: TokenDecimalsEvidence,
+    token1_decimals: TokenDecimalsEvidence,
+) -> HistoricalSwapPointObservation:
+    """Normalize one revalidated canonical Swap into a Base-USDC source-time point."""
+    swap_evidence = strict_reconstruct_model(CanonicalSwapEvidence, swap_evidence)
+    creation_evidence = strict_reconstruct_model(CanonicalPoolCreatedEvidence, creation_evidence)
+    token0_decimals = strict_reconstruct_model(TokenDecimalsEvidence, token0_decimals)
+    token1_decimals = strict_reconstruct_model(TokenDecimalsEvidence, token1_decimals)
+
+    creation = creation_evidence.creation
+    swap = swap_evidence.swap
+    if swap.pool_address != creation.pool_address:
+        raise ValueError("Swap pool must match canonical PoolCreated pool")
+    if swap.order_key <= creation.order_key:
+        raise ValueError("Swap must be strictly after canonical PoolCreated")
+    if token0_decimals.token_address != creation.token0 or token1_decimals.token_address != creation.token1:
+        raise ValueError("decimal evidence must match canonical token0/token1 identities")
+    if token0_decimals.token_address == token1_decimals.token_address:
+        raise ValueError("duplicate decimal evidence token identity")
+
+    quote_matches = [token for token in (creation.token0, creation.token1) if token == _BASE_USDC_ADDRESS]
+    if len(quote_matches) != 1:
+        raise ValueError("unsupported or ambiguous Base-USDC quote topology")
+    quote_address = quote_matches[0]
+    base_address = creation.token1 if quote_address == creation.token0 else creation.token0
+    base_evidence = token1_decimals if base_address == creation.token1 else token0_decimals
+    quote_evidence = token1_decimals if quote_address == creation.token1 else token0_decimals
+
+    price, computed_base, computed_quote = compute_realized_execution_price(
+        swap,
+        token0=creation.token0,
+        token1=creation.token1,
+        quote_allowlist=(_BASE_USDC_ADDRESS,),
+        decimals_by_address={
+            token0_decimals.token_address: token0_decimals.decimals,
+            token1_decimals.token_address: token1_decimals.decimals,
+        },
+    )
+    if computed_base != base_address or computed_quote != quote_address:
+        raise ValueError("computed base/quote orientation mismatch")
+    source_time = require_utc(swap_evidence.block.timestamp)
+    availability = EventAvailability.model_validate(
+        {
+            "status": EventAvailabilityStatus.SOURCE_TIME_ONLY,
+            "source_event_time": source_time,
+            "received_time": None,
+            "decision_available_time": None,
+            "availability_policy_version": _OBSERVATION_DEFINITION_VERSION,
+            "availability_provenance_ref": compute_raw_canonical_binding_digest(swap_evidence),
+        }
+    )
+    return HistoricalSwapPointObservation.model_validate(
+        {
+            "observation_definition_version": _OBSERVATION_DEFINITION_VERSION,
+            "source": _SOURCE,
+            "chain_id": 8453,
+            "protocol_version": swap.protocol_version,
+            "pool_address": swap.pool_address,
+            "base_asset": AssetIdentity(chain=_CHAIN, asset_key=base_address, symbol=None),
+            "quote_asset": AssetIdentity(chain=_CHAIN, asset_key=quote_address, symbol=None),
+            "source_observation_time": source_time,
+            "availability": availability,
+            "realized_execution_price_quote_per_base": price,
+            "base_decimals": base_evidence.decimals,
+            "quote_decimals": quote_evidence.decimals,
+            "transaction_hash": swap.transaction_hash,
+            "block_number": swap.block_number,
+            "block_hash": swap.block_hash,
+            "transaction_index": swap.transaction_index,
+            "log_index": swap.log_index,
+            "swap_evidence_binding_digest": compute_raw_canonical_binding_digest(swap_evidence),
+            "base_decimals_evidence_digest": base_evidence.evidence_digest,
+            "quote_decimals_evidence_digest": quote_evidence.evidence_digest,
+            "quote_policy_version": _BASE_USDC_QUOTE_POLICY_VERSION,
+        }
+    )
 
 
 def _orient_base_quote(

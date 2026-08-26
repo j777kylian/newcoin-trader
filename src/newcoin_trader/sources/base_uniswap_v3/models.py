@@ -7,11 +7,17 @@ import json
 from collections import defaultdict
 from collections.abc import Mapping, Sequence
 from datetime import datetime
+from decimal import Decimal
 from enum import StrEnum
 from typing import Any, Self, TypeVar, cast
 
 from pydantic import BaseModel, ConfigDict, ValidationError, field_validator, model_validator
 
+from newcoin_trader.domain.early_market_events import (
+    AssetIdentity,
+    EventAvailability,
+    EventAvailabilityStatus,
+)
 from newcoin_trader.domain.types import require_utc
 from newcoin_trader.sources.base_uniswap_v3.contracts import (
     CHAIN_ID,
@@ -1183,6 +1189,179 @@ class VerifiedExactPoolSwapScanResult(BaseModel):
         )
 
 
+def compute_token_decimals_evidence_digest(
+    *,
+    chain_id: object,
+    token_address: object,
+    decimals: object,
+    evidence_block_number: object,
+    evidence_block_hash: object,
+    verification_version: object,
+) -> str:
+    """SHA-256 binding for normalized Base token-decimals evidence fields."""
+    bound_chain_id = require_non_bool_int(chain_id, field_name="chain_id")
+    address = normalize_address(token_address, field_name="token_address")
+    bound_decimals = require_non_bool_int(decimals, field_name="decimals", minimum=0)
+    bound_block_number = require_non_bool_int(evidence_block_number, field_name="evidence_block_number", minimum=1)
+    block_hash = normalize_hex32(evidence_block_hash, field_name="evidence_block_hash")
+    if not isinstance(verification_version, str) or not verification_version.strip():
+        raise ValueError("verification_version required")
+    return _stable_json_sha256_digest(
+        {
+            "domain": "newcoin-trader:base_uniswap_v3:token_decimals_evidence_v1",
+            "chain_id": bound_chain_id,
+            "token_address": address,
+            "decimals": bound_decimals,
+            "evidence_block_number": bound_block_number,
+            "evidence_block_hash": block_hash,
+            "verification_version": verification_version.strip(),
+        }
+    )
+
+
+class TokenDecimalsEvidence(BaseModel):
+    """Exact-address decimal evidence consumed by pure historical normalization."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    chain_id: int
+    token_address: str
+    decimals: int
+    evidence_block_number: int
+    evidence_block_hash: str
+    verification_version: str
+    evidence_digest: str
+
+    @model_validator(mode="before")
+    @classmethod
+    def _normalize(cls, data: Any) -> Any:
+        if not isinstance(data, dict):
+            return data
+        out = dict(data)
+        out["token_address"] = normalize_address(out.get("token_address"), field_name="token_address")
+        out["evidence_block_hash"] = normalize_hex32(out.get("evidence_block_hash"), field_name="evidence_block_hash")
+        return out
+
+    @model_validator(mode="after")
+    def _validate(self) -> TokenDecimalsEvidence:
+        if self.chain_id != CHAIN_ID:
+            raise ValueError("token decimals evidence chain_id must equal Base CHAIN_ID")
+        decimals = require_non_bool_int(self.decimals, field_name="decimals", minimum=0)
+        if decimals > 255:
+            raise ValueError("decimals must be <= 255")
+        require_non_bool_int(self.evidence_block_number, field_name="evidence_block_number", minimum=1)
+        if not isinstance(self.verification_version, str) or not self.verification_version.strip():
+            raise ValueError("verification_version required")
+        if not isinstance(self.evidence_digest, str) or not self.evidence_digest.strip():
+            raise ValueError("evidence_digest required")
+        expected_digest = compute_token_decimals_evidence_digest(
+            chain_id=self.chain_id,
+            token_address=self.token_address,
+            decimals=self.decimals,
+            evidence_block_number=self.evidence_block_number,
+            evidence_block_hash=self.evidence_block_hash,
+            verification_version=self.verification_version,
+        )
+        if self.evidence_digest != expected_digest:
+            raise ValueError("evidence_digest does not bind token decimals evidence fields")
+        return self
+
+    def model_copy(
+        self,
+        *,
+        update: Mapping[str, Any] | None = None,
+        deep: bool = False,
+    ) -> Self:
+        return cast(Self, validated_model_copy(self, update=update, deep=deep))
+
+
+class HistoricalSwapPointObservation(BaseModel):
+    """One canonical Base Uniswap V3 Swap, normalized as a source-time-only price point."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    observation_definition_version: str
+    source: str
+    chain_id: int
+    protocol_version: str
+    pool_address: str
+    base_asset: AssetIdentity
+    quote_asset: AssetIdentity
+    source_observation_time: datetime
+    availability: EventAvailability
+    realized_execution_price_quote_per_base: Decimal
+    base_decimals: int
+    quote_decimals: int
+    transaction_hash: str
+    block_number: int
+    block_hash: str
+    transaction_index: int
+    log_index: int
+    swap_evidence_binding_digest: str
+    base_decimals_evidence_digest: str
+    quote_decimals_evidence_digest: str
+    quote_policy_version: str
+
+    @field_validator("source_observation_time")
+    @classmethod
+    def _aware(cls, value: datetime) -> datetime:
+        return require_utc(value)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _normalize(cls, data: Any) -> Any:
+        if not isinstance(data, dict):
+            return data
+        out = dict(data)
+        for field in ("pool_address",):
+            out[field] = normalize_address(out.get(field), field_name=field)
+        for field in ("transaction_hash", "block_hash"):
+            out[field] = normalize_hex32(out.get(field), field_name=field)
+        return out
+
+    @model_validator(mode="after")
+    def _validate(self) -> HistoricalSwapPointObservation:
+        if self.source != "base_uniswap_v3" or self.chain_id != CHAIN_ID:
+            raise ValueError("historical swap observation source/chain mismatch")
+        if self.protocol_version != PROTOCOL_VERSION:
+            raise ValueError("historical swap observation protocol mismatch")
+        if self.base_asset.chain != "base" or self.quote_asset.chain != "base":
+            raise ValueError("historical swap observation assets must be Base identities")
+        if self.base_asset.asset_key == self.quote_asset.asset_key:
+            raise ValueError("base and quote assets must differ")
+        if self.availability.status is not EventAvailabilityStatus.SOURCE_TIME_ONLY:
+            raise ValueError("historical swap observation requires SOURCE_TIME_ONLY availability")
+        if self.availability.source_event_time != self.source_observation_time:
+            raise ValueError("availability source time must equal observation source time")
+        price = self.realized_execution_price_quote_per_base
+        if price <= 0 or not price.is_finite():
+            raise ValueError("realized execution price must be finite and positive")
+        for field in ("base_decimals", "quote_decimals"):
+            decimals = require_non_bool_int(getattr(self, field), field_name=field, minimum=0)
+            if decimals > 255:
+                raise ValueError(f"{field} must be <= 255")
+        for field in ("block_number", "transaction_index", "log_index"):
+            require_non_bool_int(getattr(self, field), field_name=field, minimum=0)
+        for field in (
+            "observation_definition_version",
+            "swap_evidence_binding_digest",
+            "base_decimals_evidence_digest",
+            "quote_decimals_evidence_digest",
+            "quote_policy_version",
+        ):
+            if not isinstance(getattr(self, field), str) or not getattr(self, field).strip():
+                raise ValueError(f"{field} required")
+        return self
+
+    def model_copy(
+        self,
+        *,
+        update: Mapping[str, Any] | None = None,
+        deep: bool = False,
+    ) -> Self:
+        return cast(Self, validated_model_copy(self, update=update, deep=deep))
+
+
 def assert_finality_for_block(block: VerifiedBlock, finality: FinalityBoundary) -> None:
     if block.number > finality.number:
         raise ValueError("verified block after finality boundary")
@@ -1200,6 +1379,8 @@ __all__ = [
     "FactoryPoolCreatedRecord",
     "FactoryUniverseScanProof",
     "FinalityBoundary",
+    "HistoricalSwapPointObservation",
+    "TokenDecimalsEvidence",
     "VerifiedFactoryUniverse",
     "ScanKind",
     "ScanLedgerEntry",
@@ -1212,6 +1393,7 @@ __all__ = [
     "compute_aggregate_exact_pool_scan_digest",
     "compute_canonical_pool_created_candidates_digest",
     "compute_canonical_swap_candidates_digest",
+    "compute_token_decimals_evidence_digest",
     "compute_raw_pool_created_binding_digest",
     "compute_raw_canonical_binding_digest",
     "normalize_address",

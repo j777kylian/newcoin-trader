@@ -19,6 +19,7 @@ from newcoin_trader.sources.base_uniswap_v3.adapter import (
     adapt_dex_first_trade,
     build_eligible_scope,
     compute_realized_execution_price,
+    normalize_historical_swap_point_observation,
     select_earliest_valid_swap,
 )
 from newcoin_trader.sources.base_uniswap_v3.contracts import (
@@ -40,12 +41,14 @@ from newcoin_trader.sources.base_uniswap_v3.models import (
     ScanLedgerEntry,
     ScanStatus,
     SwapLogRecord,
+    TokenDecimalsEvidence,
     VerifiedBlock,
     VerifiedExactPoolSwapScanResult,
     VerifiedFactoryUniverse,
     VerifiedReceipt,
     compute_canonical_pool_created_candidates_digest,
     compute_canonical_swap_candidates_digest,
+    compute_token_decimals_evidence_digest,
 )
 
 TOKEN0 = "0x4200000000000000000000000000000000000006"
@@ -1120,4 +1123,220 @@ def test_adapter_rejects_mismatched_proof_finality_objects() -> None:
                 finality=boundary,
                 scan_result=_scan_result((_swap_evidence(),), finality=other),
             )
+        )
+
+
+def _decimals(token_address: str, decimals: int, **overrides: object) -> TokenDecimalsEvidence:
+    payload: dict[str, object] = {
+        "chain_id": CHAIN_ID,
+        "token_address": token_address,
+        "decimals": decimals,
+        "evidence_block_number": CREATION_BLOCK,
+        "evidence_block_hash": BLOCK_HASH,
+        "verification_version": "base_token_decimals_v1",
+        "evidence_digest": "sha256:" + ("12" * 32),
+    }
+    payload.update(overrides)
+    payload["evidence_digest"] = compute_token_decimals_evidence_digest(
+        chain_id=payload["chain_id"],
+        token_address=payload["token_address"],
+        decimals=payload["decimals"],
+        evidence_block_number=payload["evidence_block_number"],
+        evidence_block_hash=payload["evidence_block_hash"],
+        verification_version=payload["verification_version"],
+    )
+    return TokenDecimalsEvidence.model_validate(payload)
+
+
+def test_normalize_historical_swap_point_uses_base_usdc_and_source_time_only() -> None:
+    observation = normalize_historical_swap_point_observation(
+        swap_evidence=_swap_evidence(),
+        creation_evidence=_creation_evidence(),
+        token0_decimals=_decimals(TOKEN0, 18),
+        token1_decimals=_decimals(TOKEN1, 6),
+    )
+
+    assert observation.base_asset.asset_key == TOKEN0
+    assert observation.quote_asset.asset_key == TOKEN1
+    assert observation.realized_execution_price_quote_per_base == Decimal("2000")
+    assert observation.source_observation_time == TS
+    assert observation.availability.status is EventAvailabilityStatus.SOURCE_TIME_ONLY
+    assert observation.availability.received_time is None
+    assert observation.availability.decision_available_time is None
+    assert observation.transaction_hash == TX_HASH
+    assert observation.quote_policy_version == "base_usdc_quote_v1"
+
+
+def test_normalize_historical_swap_point_rejects_constructed_decimal_evidence() -> None:
+    corrupt = TokenDecimalsEvidence.model_construct(
+        chain_id=CHAIN_ID,
+        token_address=TOKEN1,
+        decimals=999,
+        evidence_block_number=CREATION_BLOCK,
+        evidence_block_hash=BLOCK_HASH,
+        verification_version="base_token_decimals_v1",
+        evidence_digest="sha256:" + ("12" * 32),
+    )
+    with pytest.raises(ValueError, match="decimals"):
+        normalize_historical_swap_point_observation(
+            swap_evidence=_swap_evidence(),
+            creation_evidence=_creation_evidence(),
+            token0_decimals=_decimals(TOKEN0, 18),
+            token1_decimals=corrupt,
+        )
+
+
+def test_normalize_historical_swap_point_rejects_noncanonical_pair_and_same_sign_deltas() -> None:
+    with pytest.raises(ValueError, match="unsupported|quote"):
+        normalize_historical_swap_point_observation(
+            swap_evidence=_swap_evidence(),
+            creation_evidence=_creation_evidence(_creation(token1=OTHER_POOL)),
+            token0_decimals=_decimals(TOKEN0, 18),
+            token1_decimals=_decimals(OTHER_POOL, 6),
+        )
+    same_sign = _swap(amount0=10**18, amount1=2000_000000)
+    with pytest.raises(ValueError, match="opposite signs"):
+        normalize_historical_swap_point_observation(
+            swap_evidence=_swap_evidence(swap=same_sign),
+            creation_evidence=_creation_evidence(),
+            token0_decimals=_decimals(TOKEN0, 18),
+            token1_decimals=_decimals(TOKEN1, 6),
+        )
+
+
+@pytest.mark.parametrize("amount0, amount1", [(0, 1), (1, 0), (-1, -1)])
+def test_normalize_historical_swap_point_rejects_invalid_signed_deltas(amount0: int, amount1: int) -> None:
+    with pytest.raises(ValueError, match="zero|opposite signs"):
+        normalize_historical_swap_point_observation(
+            swap_evidence=_swap_evidence(_swap(amount0=amount0, amount1=amount1)),
+            creation_evidence=_creation_evidence(),
+            token0_decimals=_decimals(TOKEN0, 18),
+            token1_decimals=_decimals(TOKEN1, 6),
+        )
+
+
+def test_normalize_historical_swap_point_orients_when_usdc_is_token0() -> None:
+    creation = _creation(token0=TOKEN1, token1=TOKEN0)
+    swap = _swap(amount0=2000_000000, amount1=-(10**18))
+    observation = normalize_historical_swap_point_observation(
+        swap_evidence=_swap_evidence(swap),
+        creation_evidence=_creation_evidence(creation),
+        token0_decimals=_decimals(TOKEN1, 6),
+        token1_decimals=_decimals(TOKEN0, 18),
+    )
+    assert observation.base_asset.asset_key == TOKEN0
+    assert observation.quote_asset.asset_key == TOKEN1
+    assert observation.realized_execution_price_quote_per_base == Decimal("2000")
+
+
+def test_normalize_historical_swap_point_rejects_wrong_token_decimal_evidence() -> None:
+    with pytest.raises(ValueError, match="decimal evidence.*token"):
+        normalize_historical_swap_point_observation(
+            swap_evidence=_swap_evidence(),
+            creation_evidence=_creation_evidence(),
+            token0_decimals=_decimals(OTHER_POOL, 18),
+            token1_decimals=_decimals(TOKEN1, 6),
+        )
+
+
+@pytest.mark.parametrize("decimals", [-1, 256])
+def test_token_decimals_evidence_rejects_invalid_decimals(decimals: int) -> None:
+    with pytest.raises(ValueError, match="decimals"):
+        _decimals(TOKEN0, decimals)
+
+
+def test_token_decimals_evidence_rejects_wrong_chain() -> None:
+    with pytest.raises(ValueError, match="chain_id"):
+        _decimals(TOKEN0, 18, chain_id=1)
+
+
+def test_normalize_historical_swap_point_rejects_constructed_swap_evidence() -> None:
+    corrupted = CanonicalSwapEvidence.model_construct(
+        raw_log=_raw_swap_for(_swap()),
+        swap=SwapLogRecord.model_construct(**{**_swap().model_dump(), "amount0": 0}),
+        receipt=_swap_evidence().receipt,
+        block=_swap_evidence().block,
+    )
+    with pytest.raises(ValueError, match="pool_address|mismatch|zero"):
+        normalize_historical_swap_point_observation(
+            swap_evidence=corrupted,
+            creation_evidence=_creation_evidence(),
+            token0_decimals=_decimals(TOKEN0, 18),
+            token1_decimals=_decimals(TOKEN1, 6),
+        )
+
+
+def test_normalize_historical_swap_point_rejects_model_copy_corrupted_swap_evidence() -> None:
+    corrupted = _swap_evidence().model_copy(update={"swap": _swap().model_construct(amount0=0)})
+    with pytest.raises(ValueError, match="pool_address|mismatch|zero"):
+        normalize_historical_swap_point_observation(
+            swap_evidence=corrupted,
+            creation_evidence=_creation_evidence(),
+            token0_decimals=_decimals(TOKEN0, 18),
+            token1_decimals=_decimals(TOKEN1, 6),
+        )
+
+
+def test_historical_swap_point_observation_copy_rejects_invalid_availability() -> None:
+    observation = normalize_historical_swap_point_observation(
+        swap_evidence=_swap_evidence(),
+        creation_evidence=_creation_evidence(),
+        token0_decimals=_decimals(TOKEN0, 18),
+        token1_decimals=_decimals(TOKEN1, 6),
+    )
+    invalid = EventAvailability.model_construct(
+        status=EventAvailabilityStatus.SOURCE_TIME_ONLY,
+        source_event_time=TS,
+        received_time=TS,
+        decision_available_time=None,
+        availability_policy_version="invalid",
+        availability_provenance_ref="invalid",
+    )
+    with pytest.raises(ValueError, match="SOURCE_TIME_ONLY"):
+        observation.model_copy(update={"availability": invalid})
+
+
+@pytest.mark.parametrize(
+    "field, value",
+    [
+        ("decimals", 18),
+        ("token_address", TOKEN0),
+        ("evidence_block_number", CREATION_BLOCK + 1),
+        ("evidence_block_hash", "0x" + ("34" * 32)),
+        ("verification_version", "base_token_decimals_v2"),
+    ],
+)
+def test_token_decimals_evidence_rejects_stale_digest_after_valid_field_tamper(field: str, value: object) -> None:
+    valid = _decimals(TOKEN1, 6)
+    with pytest.raises(ValueError, match="evidence_digest"):
+        valid.model_copy(update={field: value})
+
+
+def test_token_decimals_evidence_digest_is_normalized_and_deterministic() -> None:
+    lower = _decimals(TOKEN1, 6)
+    upper = _decimals(TOKEN1.upper().replace("0X", "0x"), 6)
+    assert lower.evidence_digest == upper.evidence_digest
+    assert lower.evidence_digest == compute_token_decimals_evidence_digest(
+        chain_id=CHAIN_ID,
+        token_address=TOKEN1,
+        decimals=6,
+        evidence_block_number=CREATION_BLOCK,
+        evidence_block_hash=BLOCK_HASH,
+        verification_version="base_token_decimals_v1",
+    )
+
+
+def test_token_decimals_evidence_accepts_recomputed_digest_for_changed_content() -> None:
+    assert _decimals(TOKEN1, 18).decimals == 18
+
+
+def test_normalizer_rejects_constructed_decimal_evidence_with_stale_digest() -> None:
+    valid = _decimals(TOKEN1, 6)
+    corrupt = TokenDecimalsEvidence.model_construct(**{**valid.model_dump(), "decimals": 18})
+    with pytest.raises(ValueError, match="evidence_digest"):
+        normalize_historical_swap_point_observation(
+            swap_evidence=_swap_evidence(),
+            creation_evidence=_creation_evidence(),
+            token0_decimals=_decimals(TOKEN0, 18),
+            token1_decimals=corrupt,
         )
