@@ -246,6 +246,7 @@ class VerifiedReceipt(BaseModel):
     block_number: int
     transaction_index: int
     status: int
+    contract_address: str | None = None
 
     @model_validator(mode="before")
     @classmethod
@@ -255,6 +256,8 @@ class VerifiedReceipt(BaseModel):
         out = dict(data)
         out["transaction_hash"] = normalize_hex32(out.get("transaction_hash"), field_name="transaction_hash")
         out["block_hash"] = normalize_hex32(out.get("block_hash"), field_name="block_hash")
+        if out.get("contract_address") is not None:
+            out["contract_address"] = normalize_address(out["contract_address"], field_name="contract_address")
         return out
 
     @model_validator(mode="after")
@@ -263,6 +266,57 @@ class VerifiedReceipt(BaseModel):
         require_non_bool_int(self.transaction_index, field_name="transaction_index", minimum=0)
         require_non_bool_int(self.status, field_name="status", minimum=0)
         return self
+
+
+class FactoryDeploymentAnchor(BaseModel):
+    """Explicit immutable deployment identity plus its receipt/header evidence."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    factory_address: str
+    deployment_transaction_hash: str
+    deployment_block_number: int
+    deployment_block_hash: str
+    anchor_version: str
+    receipt: VerifiedReceipt
+    block: VerifiedBlock
+
+    @model_validator(mode="before")
+    @classmethod
+    def _normalize(cls, data: Any) -> Any:
+        if not isinstance(data, dict):
+            return data
+        out = dict(data)
+        out["factory_address"] = normalize_address(out.get("factory_address"), field_name="factory_address")
+        out["deployment_transaction_hash"] = normalize_hex32(
+            out.get("deployment_transaction_hash"), field_name="deployment_transaction_hash"
+        )
+        out["deployment_block_hash"] = normalize_hex32(
+            out.get("deployment_block_hash"), field_name="deployment_block_hash"
+        )
+        return out
+
+    @model_validator(mode="after")
+    def _binding(self) -> FactoryDeploymentAnchor:
+        if self.factory_address != FACTORY_ADDRESS:
+            raise ValueError("factory deployment anchor requires canonical factory address")
+        require_non_bool_int(self.deployment_block_number, field_name="deployment_block_number", minimum=0)
+        if self.anchor_version != "base_factory_deployment_receipt_v1":
+            raise ValueError("factory deployment anchor_version mismatch")
+        if self.receipt.status != 1 or self.receipt.contract_address != self.factory_address:
+            raise ValueError("factory deployment receipt contractAddress mismatch")
+        if (
+            self.receipt.transaction_hash != self.deployment_transaction_hash
+            or self.receipt.block_number != self.deployment_block_number
+            or self.receipt.block_hash != self.deployment_block_hash
+            or self.block.number != self.deployment_block_number
+            or self.block.hash != self.deployment_block_hash
+        ):
+            raise ValueError("factory deployment explicit anchor/receipt/block mismatch")
+        return self
+
+    def model_copy(self, *, update: Mapping[str, Any] | None = None, deep: bool = False) -> Self:
+        return cast(Self, validated_model_copy(self, update=update, deep=deep))
 
 
 class FinalityBoundary(BaseModel):
@@ -637,35 +691,55 @@ def validate_ordered_scan_ledger_completeness(
             raise ValueError("unsupported cap policy")
 
     by_id = {entry.scan_id: entry for entry in entries}
+    if len(by_id) != len(entries):
+        raise ValueError("duplicate scan ledger entry id")
     children_by_parent: dict[str, list[ScanLedgerEntry]] = defaultdict(list)
+    roots: list[ScanLedgerEntry] = []
     for entry in entries:
-        if entry.parent_scan_id is not None:
+        if entry.parent_scan_id is None:
+            roots.append(entry)
+        else:
             children_by_parent[entry.parent_scan_id].append(entry)
 
-    for entry in entries:
-        if entry.status is ScanStatus.INCOMPLETE:
-            kids = children_by_parent.get(entry.scan_id, [])
-            if not kids:
-                raise ValueError("unresolved split: incomplete parent without children")
-            if any(child.status not in COMPLETED_STATUSES for child in kids):
-                raise ValueError("unresolved split: non-terminal child")
-            child_intervals = [(child.from_block, child.to_block) for child in kids]
-            if not _intervals_cover(child_intervals, lower=entry.from_block, upper=entry.to_block):
-                raise ValueError("unresolved split: children do not cover parent range")
-        elif entry.status not in COMPLETED_STATUSES:
+    def require_exact_partition(intervals: list[tuple[int, int]], *, lower: int, upper: int) -> None:
+        cursor = lower
+        for start, end in sorted(intervals):
+            if start != cursor or end < start or end > upper:
+                raise ValueError("unresolved split: child coverage gap")
+            cursor = end + 1
+        if cursor != upper + 1:
+            raise ValueError("unresolved split: child coverage gap")
+
+    visited: set[str] = set()
+
+    def validate_tree(entry: ScanLedgerEntry, ancestors: set[str]) -> None:
+        if entry.scan_id in ancestors:
+            raise ValueError("unresolved split: cyclic parent")
+        if entry.scan_id in visited:
+            return
+        visited.add(entry.scan_id)
+        kids = children_by_parent.get(entry.scan_id, [])
+        if entry.status in COMPLETED_STATUSES:
+            if kids:
+                raise ValueError("unresolved split: completed parent has children")
+            return
+        if entry.status is not ScanStatus.INCOMPLETE:
             raise ValueError("non-terminal scan ledger entry")
+        if not kids:
+            raise ValueError("unresolved split: incomplete parent without children")
+        require_exact_partition(
+            [(child.from_block, child.to_block) for child in kids], lower=entry.from_block, upper=entry.to_block
+        )
+        for child in kids:
+            validate_tree(child, ancestors | {entry.scan_id})
 
-    for parent_id, _kids in children_by_parent.items():
-        parent = by_id.get(parent_id)
-        if parent is None:
-            raise ValueError("unresolved split: missing parent")
-        if parent.status not in COMPLETED_STATUSES and parent.status is not ScanStatus.INCOMPLETE:
-            raise ValueError("unresolved split: non-terminal parent")
-
-    completed = [entry for entry in entries if entry.status in COMPLETED_STATUSES]
-    intervals = [(entry.from_block, entry.to_block) for entry in completed]
-    if not _intervals_cover(intervals, lower=lower_block, upper=upper_block):
-        raise ValueError("incomplete scan coverage or gap")
+    for root in roots:
+        validate_tree(root, set())
+    if len(visited) != len(entries):
+        raise ValueError("unresolved split: missing parent or cyclic parent")
+    require_exact_partition(
+        [(entry.from_block, entry.to_block) for entry in roots], lower=lower_block, upper=upper_block
+    )
 
 
 class FactoryUniverseScanProof(BaseModel):
@@ -1376,6 +1450,7 @@ __all__ = [
     "CapPolicy",
     "COMPLETED_STATUSES",
     "ExactPoolHistoryScanProof",
+    "FactoryDeploymentAnchor",
     "FactoryPoolCreatedRecord",
     "FactoryUniverseScanProof",
     "FinalityBoundary",

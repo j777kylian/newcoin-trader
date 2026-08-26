@@ -1,5 +1,11 @@
 """Base Uniswap V3 in-memory source boundary (Phase 8C.4)."""
 
+from newcoin_trader.sources.base_uniswap_v3.acquisition import (
+    AcquisitionError,
+    AcquisitionFailure,
+    AcquisitionFailureResult,
+    BaseEvidenceAcquirer,
+)
 from newcoin_trader.sources.base_uniswap_v3.adapter import (
     AdapterRequest,
     adapt_dex_first_trade,
@@ -22,6 +28,7 @@ from newcoin_trader.sources.base_uniswap_v3.models import (
     CapAmbiguityError,
     CapPolicy,
     ExactPoolHistoryScanProof,
+    FactoryDeploymentAnchor,
     FactoryPoolCreatedRecord,
     FactoryUniverseScanProof,
     FinalityBoundary,
@@ -38,6 +45,16 @@ from newcoin_trader.sources.base_uniswap_v3.models import (
     compute_canonical_swap_candidates_digest,
 )
 from newcoin_trader.sources.base_uniswap_v3.pool_created_decoder import decode_pool_created_log
+from newcoin_trader.sources.base_uniswap_v3.provider import (
+    BaseRpcProvider,
+    RpcCallResult,
+    RpcCapabilityProfile,
+    RpcError,
+    RpcMethodError,
+    RpcResponseError,
+    RpcTransportError,
+    sanitize_rpc_endpoint,
+)
 from newcoin_trader.sources.base_uniswap_v3.scan_ledger import InMemoryScanLedger
 from newcoin_trader.sources.base_uniswap_v3.swap_decoder import decode_swap_log
 
@@ -48,10 +65,16 @@ __all__ = [
     "PROTOCOL_VERSION",
     "SWAP_TOPIC",
     "AdapterRequest",
+    "AcquisitionError",
+    "AcquisitionFailure",
+    "AcquisitionFailureResult",
+    "BaseEvidenceAcquirer",
+    "BaseRpcProvider",
     "CanonicalPoolCreatedEvidence",
     "CanonicalSwapEvidence",
     "CapAmbiguityError",
     "CapPolicy",
+    "FactoryDeploymentAnchor",
     "ExactPoolHistoryScanProof",
     "FactoryPoolCreatedRecord",
     "FactoryUniverseScanProof",
@@ -61,6 +84,12 @@ __all__ = [
     "ScanKind",
     "ScanLedgerEntry",
     "ScanStatus",
+    "RpcCallResult",
+    "RpcCapabilityProfile",
+    "RpcError",
+    "RpcMethodError",
+    "RpcResponseError",
+    "RpcTransportError",
     "SwapLogRecord",
     "TokenDecimalsEvidence",
     "VerifiedBlock",
@@ -75,5 +104,6 @@ __all__ = [
     "decode_pool_created_log",
     "decode_swap_log",
     "select_earliest_valid_swap",
+    "sanitize_rpc_endpoint",
     "validate_factory_universe",
 ]
