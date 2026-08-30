@@ -51,7 +51,7 @@ def _qualification_responses() -> list[object]:
         _response(
             2,
             {
-                "context": {"slot": 100},
+                "context": {"slot": 101},
                 "value": {
                     "owner": LOADER,
                     "data": {"parsed": {"type": "program", "info": {"programData": PROGRAMDATA}}},
@@ -61,7 +61,7 @@ def _qualification_responses() -> list[object]:
         _response(
             3,
             {
-                "context": {"slot": 100},
+                "context": {"slot": 101},
                 "value": {
                     "owner": LOADER,
                     "data": {"parsed": {"type": "programData", "info": {"slot": 88}}},
@@ -69,9 +69,9 @@ def _qualification_responses() -> list[object]:
             },
         ),
         _response(
-            4,
-            [{"signature": SIGNATURE, "slot": 99, "err": {"InstructionError": 0}, "blockTime": 1_754_006_499}],
+            4, [{"signature": SIGNATURE, "slot": 99, "err": {"InstructionError": 0}, "blockTime": 1_754_006_499}]
         ),
+        _response(5, 101),
     ]
 
 
@@ -131,6 +131,7 @@ def test_qualification_freezes_finalized_upper_slot_before_program_and_page_trav
         "getAccountInfo",
         "getAccountInfo",
         "getSignaturesForAddress",
+        "getSlot",
     ]
     assert transport.calls[0][1]["params"] == [{"commitment": "finalized"}]
     assert transport.calls[1][1]["params"] == [
@@ -141,16 +142,17 @@ def test_qualification_freezes_finalized_upper_slot_before_program_and_page_trav
         PROGRAMDATA,
         {"commitment": "finalized", "encoding": "jsonParsed", "withContext": True},
     ]
-    assert transport.calls[-1][1]["params"] == [
+    assert transport.calls[-2][1]["params"] == [
         PUMP_PROGRAM_ADDRESS,
         {"commitment": "finalized", "limit": 1},
     ]
-    assert receipt.frozen_upper_slot == 100
+    assert transport.calls[-1][1]["params"] == [{"commitment": "finalized"}]
+    assert receipt.frozen_upper_slot == 101
     assert receipt.frozen_lower_slot == 99
     assert receipt.candidate_count == 1
     assert receipt.decoded_count == receipt.first_buy_count == 0
     assert receipt.ambiguous_count == 1
-    assert receipt.rpc_attempts == 4
+    assert receipt.rpc_attempts == 5
     assert receipt.status is PumpQualificationStatus.INCONCLUSIVE
     assert receipt.price_evidence_result == "DEFERRED"
     assert receipt.provider_origin == "https://rpc.example.invalid"
@@ -222,13 +224,13 @@ def test_qualification_rejects_programdata_context_or_deploy_slot_after_frozen_u
     programdata = responses[2]
     assert isinstance(programdata, dict)
     programdata["result"] = {
-        "context": {"slot": 101},
+        "context": {"slot": 102},
         "value": {
             "owner": LOADER,
-            "data": {"parsed": {"type": "programData", "info": {"slot": 101}}},
+            "data": {"parsed": {"type": "programData", "info": {"slot": 102}}},
         },
     }
-    with pytest.raises(ValueError, match="frozen finalized upper slot"):
+    with pytest.raises(ValueError, match="evidence exceeds frozen finalized upper slot"):
         asyncio.run(
             qualify_pump_source(
                 PumpRpcProvider("https://rpc.example.invalid", transport=FakeTransport(responses)),
@@ -270,7 +272,7 @@ def test_receipt_rejects_frozen_slot_tampering_against_raw_evidence() -> None:
     with pytest.raises(TypeError, match="not a public construction boundary"):
         PumpQualificationReceipt.model_construct(**{**receipt.__dict__, "frozen_lower_slot": 98})
     with pytest.raises(ValueError, match="receipt digest does not bind content"):
-        receipt.model_copy(update={"frozen_upper_slot": 101})
+        receipt.model_copy(update={"frozen_upper_slot": 102})
     with pytest.raises(ValueError, match="attempt accounting"):
         receipt.model_copy(update={"rpc_attempts": 501})
     with pytest.raises(ValueError, match="provider origin must be sanitized"):
@@ -282,13 +284,4 @@ def test_receipt_rejects_frozen_slot_tampering_against_raw_evidence() -> None:
     for non_integer in (True, "1", 1.0):
         with pytest.raises(ValueError):
             PumpQualificationConfig(max_pages=non_integer)  # type: ignore[arg-type]
-    with pytest.raises(ValueError, match="exactly one page"):
-        PumpQualificationReceipt.create(
-            **{
-                **receipt.__dict__,
-                "page_evidence": (receipt.page_evidence[0], receipt.page_evidence[0]),
-                "page_count": 2,
-                "frozen_slot_evidence": receipt.frozen_upper_slot,
-                "attempt_cap": 9,
-            }
-        )
+    assert not hasattr(PumpQualificationReceipt, "create")

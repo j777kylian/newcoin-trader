@@ -288,6 +288,36 @@ def test_decoder_rejects_changed_idl_with_attacker_recomputed_digest() -> None:
         )
 
 
+def test_signature_page_canonicalizes_provider_confirmation_status() -> None:
+    page = PumpRawSignaturePageEvidence.from_get_signatures_for_address(
+        before=None,
+        limit=1,
+        response=[
+            {
+                "signature": BUY,
+                "slot": 20,
+                "err": None,
+                "blockTime": 1,
+                "confirmationStatus": "finalized",
+            }
+        ],
+    )
+    assert page.records == ({"signature": BUY, "slot": 20, "err": None, "blockTime": 1},)
+
+
+@pytest.mark.parametrize(
+    "record",
+    (
+        {"signature": BUY, "slot": 20, "err": "not-an-rpc-error-object", "blockTime": 1},
+        {"signature": BUY, "slot": 20, "err": [], "blockTime": 1},
+        {"signature": BUY, "slot": 20, "err": None, "blockTime": -1},
+    ),
+)
+def test_signature_page_rejects_malformed_canonical_fields(record: dict[str, object]) -> None:
+    with pytest.raises(ValidationError):
+        PumpRawSignaturePageEvidence.from_get_signatures_for_address(before=None, limit=1, response=[record])
+
+
 def test_signature_page_rejects_mutated_raw_records() -> None:
     page = _page(_candidate(BUY, 20, 0, kind="buy"))
     with pytest.raises(ValidationError, match="digest"):

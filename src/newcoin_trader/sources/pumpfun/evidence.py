@@ -574,15 +574,21 @@ class PumpRawSignaturePageEvidence(_RevalidatingModel):
 
     @classmethod
     def from_get_signatures_for_address(cls, *, before: str | None, limit: int, response: object) -> Self:
-        if not isinstance(response, list):
-            raise ValueError("getSignaturesForAddress response must be a list")
+        if not isinstance(response, list) or any(not isinstance(row, Mapping) for row in response):
+            raise ValueError("getSignaturesForAddress response must be a list of records")
+        try:
+            records = tuple(
+                {field: row[field] for field in ("signature", "slot", "err", "blockTime")} for row in response
+            )
+        except KeyError as error:
+            raise ValueError("getSignaturesForAddress record is incomplete") from error
         return cls(
             program_address=PUMP_PROGRAM_ADDRESS,
             commitment="finalized",
             request_before=before,
             limit=limit,
-            records=tuple(dict(row) for row in response if isinstance(row, Mapping)),
-            raw_payload_digest=_digest(cls._payload(before, limit, response)),
+            records=records,
+            raw_payload_digest=_digest(cls._payload(before, limit, records)),
         )
 
     @staticmethod
@@ -612,12 +618,10 @@ class PumpRawSignaturePageEvidence(_RevalidatingModel):
                 raise ValueError("signature page record schema is invalid")
             _signature(record["signature"])
             _index(record["slot"], field="page record slot")
-            if (
-                isinstance(record["blockTime"], bool)
-                or record["blockTime"] is not None
-                and not isinstance(record["blockTime"], int)
-            ):
-                raise ValueError("page record blockTime is invalid")
+            if record["err"] is not None and not isinstance(record["err"], Mapping):
+                raise ValueError("page record err is invalid")
+            if record["blockTime"] is not None:
+                _index(record["blockTime"], field="page record blockTime")
         if self.raw_payload_digest != _digest(self._payload(self.request_before, self.limit, self.records)):
             raise ValueError("raw signature page digest does not bind returned records")
         return self

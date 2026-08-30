@@ -221,7 +221,9 @@ class PumpQualificationReceipt(BaseModel):
         return self
 
     @classmethod
-    def create(cls, **values: Any) -> Self:
+    def _create(cls, *, _factory_context: object, **values: Any) -> Self:
+        if _factory_context is not _RECEIPT_FACTORY_CONTEXT:
+            raise ValueError("Pump qualification receipt requires the controlled factory boundary")
         payload = dict(values)
         frozen_slot_evidence = payload.pop("frozen_slot_evidence", None)
         attempt_cap = payload.pop("attempt_cap", None)
@@ -361,7 +363,9 @@ async def qualify_pump_source(
     """
     config = PumpQualificationConfig.model_validate((config or PumpQualificationConfig()).model_dump(mode="python"))
     budget = [config.attempt_cap]
-    upper = _slot((await provider.call("getSlot", [{"commitment": "finalized"}], attempt_budget=budget)).result)
+    pre_read_upper = _slot(
+        (await provider.call("getSlot", [{"commitment": "finalized"}], attempt_budget=budget)).result
+    )
     program_response = (
         await provider.call(
             "getAccountInfo",
@@ -388,8 +392,6 @@ async def qualify_pump_source(
         program_response=program_response,  # type: ignore[arg-type]
         programdata_response=programdata_response,  # type: ignore[arg-type]
     )
-    if programdata.last_deploy_slot > upper or any(slot > upper for slot in programdata.context_slots):
-        raise ValueError("Pump ProgramData evidence exceeds frozen finalized upper slot")
     profile = PumpQualifiedSourceProfile(
         programdata=programdata,
         decoder=pinned_pump_decoder_evidence(),
@@ -406,10 +408,17 @@ async def qualify_pump_source(
         before=None, limit=config.page_limit, response=page_response
     )
     slots = tuple(_slot(record["slot"]) for record in page.records)
-    if any(slot > upper for slot in slots):
-        raise ValueError("Pump signature page exceeds frozen finalized upper slot")
+    upper = _slot((await provider.call("getSlot", [{"commitment": "finalized"}], attempt_budget=budget)).result)
+    if (
+        upper < pre_read_upper
+        or programdata.last_deploy_slot > upper
+        or any(slot > upper for slot in programdata.context_slots)
+        or any(slot > upper for slot in slots)
+    ):
+        raise ValueError("Pump qualification evidence exceeds frozen finalized upper slot")
     candidates = len(page.records)
-    return PumpQualificationReceipt.create(
+    return PumpQualificationReceipt._create(
+        _factory_context=_RECEIPT_FACTORY_CONTEXT,
         provider_origin=provider.provider_origin,
         program_address=profile.program_address,
         program_version=profile.source_version,
