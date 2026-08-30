@@ -7,11 +7,18 @@ import asyncio
 import httpx
 import pytest
 
-from newcoin_trader.sources.pumpfun.evidence import PUMP_PROGRAM_ADDRESS
+from newcoin_trader.sources.pumpfun.evidence import (
+    PUMP_PROGRAM_ADDRESS,
+    PumpMintSelectionProof,
+    VerifiedPumpLaunchUniverse,
+)
 from newcoin_trader.sources.pumpfun.qualification import (
+    PumpLiveSliceConfig,
+    PumpLiveSliceResult,
     PumpQualificationConfig,
     PumpQualificationReceipt,
     PumpQualificationStatus,
+    acquire_pump_live_slice,
     qualify_pump_source,
 )
 from newcoin_trader.sources.pumpfun.rpc import (
@@ -173,6 +180,165 @@ def test_qualification_waits_for_final_anchor_to_cover_retained_page() -> None:
     )
     assert receipt.frozen_upper_slot == 101
     assert receipt.rpc_attempts == 6
+
+
+def _live_slice_responses() -> list[object]:
+    unsupported = "3N5R8Zy6iDbeNqjR9JH4tt3FjhHVwLwWLCwT6mKrRj4D"
+    blockhash = "3u111111111111111111111111111111111111111111"
+    responses = _qualification_responses()
+    responses[3] = _response(
+        4,
+        [
+            {"signature": SIGNATURE, "slot": 99, "err": None, "blockTime": 1_754_006_499},
+            {"signature": unsupported, "slot": 98, "err": None, "blockTime": 1_754_006_498},
+        ],
+    )
+    return responses[:4] + [
+        _response(
+            5,
+            {
+                "slot": 99,
+                "meta": {"err": None, "innerInstructions": []},
+                "transaction": {
+                    "signatures": [SIGNATURE],
+                    "message": {"instructions": [{"programId": "other", "data": "", "accounts": []}]},
+                },
+            },
+        ),
+        _response(
+            6,
+            {
+                "blockhash": blockhash,
+                "previousBlockhash": None,
+                "blockHeight": 99,
+                "blockTime": 1_754_006_499,
+                "transactions": [{"transaction": {"signatures": [SIGNATURE]}}],
+            },
+        ),
+        _response(7, 101),
+    ]
+
+
+def test_live_slice_fetches_only_capped_raw_evidence_and_preserves_unsupported_disposition() -> None:
+    transport = FakeTransport(_live_slice_responses())
+    result = asyncio.run(
+        acquire_pump_live_slice(
+            PumpRpcProvider("https://rpc.example.invalid/private?token=SECRET", transport=transport),
+            config=PumpLiveSliceConfig(page_limit=2, candidate_cap=1, attempt_cap=9),
+        )
+    )
+
+    assert [call[1]["method"] for call in transport.calls] == [
+        "getSlot",
+        "getAccountInfo",
+        "getAccountInfo",
+        "getSignaturesForAddress",
+        "getTransaction",
+        "getBlock",
+        "getSlot",
+    ]
+    assert [item.disposition.value for item in result.signature_page.classifications] == [
+        "unsupported_or_no_relevant_instruction",
+        "candidate_cap_reached",
+    ]
+    assert result.signature_page.classifications[0].candidate is None
+    assert result.first_buy is None
+    assert result.status is PumpQualificationStatus.INCONCLUSIVE
+    assert result.raw_binding_result == "FAIL"
+    assert result.price_evidence_result == "DEFERRED"
+    assert result.rpc_attempts == 7
+    assert "SECRET" not in str(result)
+
+
+def _live_buy_responses() -> list[object]:
+    mint = "So11111111111111111111111111111111111111112"
+    buy = "3N5R8Zy6iDbeNqjR9JH4tt3FjhHVwLwWLCwT6mKrRj4D"
+    create = "2G4YbnQw5v5C5mR8h3D7sMjn6Qq5qP2e9u8Y4k6A1xT"
+    blockhash = "3u111111111111111111111111111111111111111111"
+
+    def transaction(signature: str, slot: int, data: str) -> dict[str, object]:
+        return {
+            "slot": slot,
+            "meta": {"err": None, "innerInstructions": []},
+            "transaction": {
+                "signatures": [signature],
+                "message": {
+                    "instructions": [
+                        {
+                            "programId": PUMP_PROGRAM_ADDRESS,
+                            "data": data,
+                            "accounts": [SIGNATURE, SIGNATURE, mint, PROGRAMDATA],
+                        }
+                    ]
+                },
+            },
+        }
+
+    def block(signature: str, slot: int) -> dict[str, object]:
+        return {
+            "blockhash": blockhash,
+            "previousBlockhash": None,
+            "blockHeight": slot,
+            "blockTime": 1_754_006_400 + slot,
+            "transactions": [{"transaction": {"signatures": [signature]}}],
+        }
+
+    responses = _qualification_responses()
+    responses[3] = _response(
+        4,
+        [
+            {"signature": buy, "slot": 99, "err": None, "blockTime": 1_754_006_499},
+            {"signature": create, "slot": 98, "err": None, "blockTime": 1_754_006_498},
+        ],
+    )
+    return responses[:4] + [
+        _response(5, transaction(buy, 99, "66063d1201daebea")),
+        _response(6, block(buy, 99)),
+        _response(7, transaction(create, 98, "181ec828051c0777")),
+        _response(8, block(create, 98)),
+        _response(9, 101),
+    ]
+
+
+def test_live_slice_selects_source_only_first_buy_only_from_matching_bounded_proof() -> None:
+    config = PumpLiveSliceConfig(page_limit=2, candidate_cap=2, attempt_cap=12)
+    seed = asyncio.run(
+        acquire_pump_live_slice(
+            PumpRpcProvider("https://rpc.example.invalid", transport=FakeTransport(_live_buy_responses())),
+            config=config,
+        )
+    )
+    proof = PumpMintSelectionProof(
+        mint="So11111111111111111111111111111111111111112",
+        universe=VerifiedPumpLaunchUniverse(
+            profile=seed.profile,
+            pages=(seed.signature_page,),
+            lower_signature="2G4YbnQw5v5C5mR8h3D7sMjn6Qq5qP2e9u8Y4k6A1xT",
+            upper_signature="3N5R8Zy6iDbeNqjR9JH4tt3FjhHVwLwWLCwT6mKrRj4D",
+            terminal_reason="lower_bound_reached",
+            terminal_cursor="2G4YbnQw5v5C5mR8h3D7sMjn6Qq5qP2e9u8Y4k6A1xT",
+            expected_candidate_count=2,
+            page_digests=(seed.signature_page.raw_page.raw_payload_digest,),
+        ),
+    )
+
+    result = asyncio.run(
+        acquire_pump_live_slice(
+            PumpRpcProvider("https://rpc.example.invalid", transport=FakeTransport(_live_buy_responses())),
+            config=config,
+            selection_proof=proof,
+        )
+    )
+
+    assert result.first_buy is not None
+    assert result.first_buy.signature == "3N5R8Zy6iDbeNqjR9JH4tt3FjhHVwLwWLCwT6mKrRj4D"
+    assert result.status is PumpQualificationStatus.INCONCLUSIVE
+    assert result.raw_binding_result == "FAIL"
+    assert result.price_evidence_result == "DEFERRED"
+    with pytest.raises(ValueError, match="live slice"):
+        result.model_copy(update={"status": PumpQualificationStatus.PASS, "rpc_attempts": 999})
+    with pytest.raises(TypeError, match="not a public construction boundary"):
+        PumpLiveSliceResult.model_construct(**result.__dict__)
 
 
 def test_qualification_never_leaks_provider_response_or_exception_text() -> None:

@@ -631,6 +631,7 @@ class PumpCandidateDispositionKind(StrEnum):
     ELIGIBLE_DECODED = "eligible_decoded"
     FAILED_TRANSACTION = "failed_transaction"
     NULL_BLOCK_TIME = "null_block_time"
+    CANDIDATE_CAP_REACHED = "candidate_cap_reached"
     UNSUPPORTED_OR_NO_RELEVANT_INSTRUCTION = "unsupported_or_no_relevant_instruction"
 
 
@@ -685,12 +686,15 @@ class PumpSignaturePage(_RevalidatingModel):
                     raise ValueError("decoded candidate must fully bind eligible raw record")
                 continue
             if record["err"] is not None:
-                expected_disposition = PumpCandidateDispositionKind.FAILED_TRANSACTION
+                allowed_dispositions = {PumpCandidateDispositionKind.FAILED_TRANSACTION}
             elif record["blockTime"] is None:
-                expected_disposition = PumpCandidateDispositionKind.NULL_BLOCK_TIME
+                allowed_dispositions = {PumpCandidateDispositionKind.NULL_BLOCK_TIME}
             else:
-                expected_disposition = PumpCandidateDispositionKind.UNSUPPORTED_OR_NO_RELEVANT_INSTRUCTION
-            if item.disposition is not expected_disposition:
+                allowed_dispositions = {
+                    PumpCandidateDispositionKind.UNSUPPORTED_OR_NO_RELEVANT_INSTRUCTION,
+                    PumpCandidateDispositionKind.CANDIDATE_CAP_REACHED,
+                }
+            if item.disposition not in allowed_dispositions:
                 raise ValueError("raw record disposition is not explicit")
         return self
 

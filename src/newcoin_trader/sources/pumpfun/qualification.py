@@ -13,6 +13,8 @@ from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, ValidationInfo, 
 from newcoin_trader.sources.pumpfun.evidence import (
     PUMP_PROGRAM_ADDRESS,
     PumpCandidateDispositionKind,
+    PumpHistoricalFirstSuccessfulBuyFact,
+    PumpMintSelectionProof,
     PumpPageRecordDisposition,
     PumpQualifiedSourceProfile,
     PumpRawBlockEvidence,
@@ -23,10 +25,12 @@ from newcoin_trader.sources.pumpfun.evidence import (
     PumpSignaturePage,
     parse_pump_instruction,
     pinned_pump_decoder_evidence,
+    select_first_successful_buy,
 )
 from newcoin_trader.sources.pumpfun.rpc import PumpRpcProvider, sanitize_pump_rpc_endpoint
 
 _RECEIPT_FACTORY_CONTEXT = object()
+_LIVE_SLICE_FACTORY_CONTEXT = object()
 
 
 class PumpQualificationStatus(StrEnum):
@@ -57,6 +61,122 @@ class PumpQualificationConfig(BaseModel):
         if type(self.candidate_cap) is not int or not 1 <= self.candidate_cap <= 10:
             raise ValueError("Pump qualification candidate_cap must be in 1..10")
         return self
+
+
+class PumpLiveSliceConfig(BaseModel):
+    """Separate 8D.C one-page raw-evidence sample; never a corpus traversal."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    page_limit: int = 5
+    candidate_cap: int = 3
+    attempt_cap: int = 25
+
+    @model_validator(mode="after")
+    def _bounded(self) -> Self:
+        if type(self.page_limit) is not int or not 1 <= self.page_limit <= 100:
+            raise ValueError("Pump live slice page_limit must be in 1..100")
+        if type(self.candidate_cap) is not int or not 1 <= self.candidate_cap <= 10:
+            raise ValueError("Pump live slice candidate_cap must be in 1..10")
+        if type(self.attempt_cap) is not int or not 1 <= self.attempt_cap <= 500:
+            raise ValueError("Pump live slice attempt_cap must be in 1..500")
+        return self
+
+
+class PumpLiveSliceResult(BaseModel):
+    """One retained raw-evidence page; source-only first-buy needs supplied complete proof."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    provider_origin: str
+    profile: PumpQualifiedSourceProfile = Field(repr=False)
+    signature_page: PumpSignaturePage = Field(repr=False)
+    frozen_upper_slot: int
+    rpc_attempts: int
+    raw_binding_result: str
+    price_evidence_result: str
+    status: PumpQualificationStatus
+    selection_proof: PumpMintSelectionProof | None = Field(default=None, repr=False, exclude=True)
+    first_buy: PumpHistoricalFirstSuccessfulBuyFact | None = None
+
+    _frozen_upper_evidence: int | None = PrivateAttr(default=None)
+    _attempt_cap: int | None = PrivateAttr(default=None)
+    _rpc_attempts: int | None = PrivateAttr(default=None)
+
+    def model_copy(self, *, update: Mapping[str, Any] | None = None, deep: bool = False) -> Self:
+        if self._frozen_upper_evidence is None or self._attempt_cap is None or self._rpc_attempts is None:
+            raise ValueError("Pump live slice lacks factory-bound operation evidence")
+        values = dict(self.__dict__)
+        rebuilt = type(self).model_validate(
+            values if update is None else {**values, **update}, context=_LIVE_SLICE_FACTORY_CONTEXT
+        )
+        if (
+            rebuilt.frozen_upper_slot != self._frozen_upper_evidence
+            or rebuilt.rpc_attempts != self._rpc_attempts
+            or rebuilt.rpc_attempts > self._attempt_cap
+        ):
+            raise ValueError("Pump live slice conflicts with factory-bound operation evidence")
+        rebuilt._frozen_upper_evidence = self._frozen_upper_evidence
+        rebuilt._attempt_cap = self._attempt_cap
+        rebuilt._rpc_attempts = self._rpc_attempts
+        return rebuilt
+
+    @classmethod
+    def model_construct(cls, _fields_set: set[str] | None = None, **values: Any) -> Self:
+        raise TypeError("PumpLiveSliceResult.model_construct is not a public construction boundary")
+
+    @model_validator(mode="after")
+    def _bound(self, info: ValidationInfo) -> Self:
+        if info.context is not _LIVE_SLICE_FACTORY_CONTEXT:
+            raise ValueError("Pump live slice requires the controlled factory boundary")
+        profile = PumpQualifiedSourceProfile.model_validate(self.profile.model_dump(mode="python"))
+        page = PumpSignaturePage.model_validate(self.signature_page.model_dump(mode="python"))
+        if (
+            self.provider_origin != sanitize_pump_rpc_endpoint(self.provider_origin)
+            or type(self.frozen_upper_slot) is not int
+            or self.frozen_upper_slot < 0
+            or type(self.rpc_attempts) is not int
+            or not 0 <= self.rpc_attempts <= 500
+            or self.raw_binding_result != "FAIL"
+            or self.price_evidence_result != "DEFERRED"
+            or self.status is not PumpQualificationStatus.INCONCLUSIVE
+            or profile.programdata.last_deploy_slot > self.frozen_upper_slot
+            or any(slot > self.frozen_upper_slot for slot in profile.programdata.context_slots)
+            or any(item.slot > self.frozen_upper_slot for item in page.classifications)
+        ):
+            raise ValueError("Pump live slice result is invalid")
+        if self.selection_proof is None:
+            if self.first_buy is not None:
+                raise ValueError("Pump first-buy requires a supplied bounded universe proof")
+            return self
+        proof = PumpMintSelectionProof.model_validate(self.selection_proof.model_dump(mode="python"))
+        if proof.universe.profile != profile or proof.universe.pages != (page,):
+            raise ValueError("Pump selection proof must bind this live page and profile")
+        if self.first_buy != select_first_successful_buy(proof):
+            raise ValueError("Pump first-buy must be selected from supplied bounded proof")
+        return self
+
+    @classmethod
+    def _create(cls, *, _factory_context: object, **values: Any) -> Self:
+        if _factory_context is not _LIVE_SLICE_FACTORY_CONTEXT:
+            raise ValueError("Pump live slice requires the controlled factory boundary")
+        payload = dict(values)
+        frozen_upper_evidence = payload.pop("frozen_upper_evidence", None)
+        attempt_cap = payload.pop("attempt_cap", None)
+        if (
+            type(frozen_upper_evidence) is not int
+            or frozen_upper_evidence < 0
+            or type(attempt_cap) is not int
+            or not 1 <= attempt_cap <= 500
+            or payload.get("frozen_upper_slot") != frozen_upper_evidence
+            or payload.get("rpc_attempts", 0) > attempt_cap
+        ):
+            raise ValueError("Pump live slice factory evidence is invalid")
+        result = cls.model_validate(payload, context=_LIVE_SLICE_FACTORY_CONTEXT)
+        result._frozen_upper_evidence = frozen_upper_evidence
+        result._attempt_cap = attempt_cap
+        result._rpc_attempts = result.rpc_attempts
+        return result
 
 
 class PumpQualificationReceipt(BaseModel):
@@ -290,7 +410,7 @@ async def _classify_page(
                     disposition=(
                         PumpCandidateDispositionKind.NULL_BLOCK_TIME
                         if record["blockTime"] is None
-                        else PumpCandidateDispositionKind.UNSUPPORTED_OR_NO_RELEVANT_INSTRUCTION
+                        else PumpCandidateDispositionKind.CANDIDATE_CAP_REACHED
                     ),
                 )
             )
@@ -351,6 +471,93 @@ async def _classify_page(
                 )
             )
     return PumpSignaturePage(raw_page=page, classifications=tuple(classifications)), remaining_candidates
+
+
+async def acquire_pump_live_slice(
+    provider: PumpRpcProvider,
+    *,
+    config: PumpLiveSliceConfig | None = None,
+    selection_proof: PumpMintSelectionProof | None = None,
+) -> PumpLiveSliceResult:
+    """Acquire one finalized Pump page and a capped raw transaction/block sample only."""
+    config = PumpLiveSliceConfig.model_validate((config or PumpLiveSliceConfig()).model_dump(mode="python"))
+    budget = [config.attempt_cap]
+    pre_read_upper = _slot(
+        (await provider.call("getSlot", [{"commitment": "finalized"}], attempt_budget=budget)).result
+    )
+    program_response = (
+        await provider.call(
+            "getAccountInfo",
+            [PUMP_PROGRAM_ADDRESS, {"commitment": "finalized", "encoding": "jsonParsed", "withContext": True}],
+            attempt_budget=budget,
+        )
+    ).result
+    try:
+        programdata_address = program_response["value"]["data"]["parsed"]["info"]["programData"]  # type: ignore[index]
+    except (KeyError, TypeError):
+        raise ValueError("Pump Program account response is invalid") from None
+    if not isinstance(programdata_address, str):
+        raise ValueError("Pump ProgramData pointer is invalid")
+    programdata_response = (
+        await provider.call(
+            "getAccountInfo",
+            [programdata_address, {"commitment": "finalized", "encoding": "jsonParsed", "withContext": True}],
+            attempt_budget=budget,
+        )
+    ).result
+    programdata = PumpRawProgramDataEvidence.from_program_accounts(
+        program_address=PUMP_PROGRAM_ADDRESS,
+        programdata_address=programdata_address,
+        program_response=program_response,  # type: ignore[arg-type]
+        programdata_response=programdata_response,  # type: ignore[arg-type]
+    )
+    decoder = pinned_pump_decoder_evidence()
+    profile = PumpQualifiedSourceProfile(programdata=programdata, decoder=decoder, idl_digest=decoder.idl_digest)
+    page_response = (
+        await provider.call(
+            "getSignaturesForAddress",
+            [PUMP_PROGRAM_ADDRESS, {"commitment": "finalized", "limit": config.page_limit}],
+            attempt_budget=budget,
+        )
+    ).result
+    page = PumpRawSignaturePageEvidence.from_get_signatures_for_address(
+        before=None, limit=config.page_limit, response=page_response
+    )
+    signature_page, _ = await _classify_page(
+        provider, page, decoder=decoder, upper=2**63 - 1, budget=budget, remaining_candidates=config.candidate_cap
+    )
+    required_upper = max(
+        pre_read_upper,
+        programdata.last_deploy_slot,
+        *programdata.context_slots,
+        *(_slot(record["slot"]) for record in page.records),
+    )
+    upper = _slot((await provider.call("getSlot", [{"commitment": "finalized"}], attempt_budget=budget)).result)
+    while upper < required_upper:
+        upper = _slot((await provider.call("getSlot", [{"commitment": "finalized"}], attempt_budget=budget)).result)
+    if upper < required_upper:
+        raise ValueError("Pump live slice evidence exceeds frozen finalized upper slot")
+    proof = (
+        None
+        if selection_proof is None
+        else PumpMintSelectionProof.model_validate(selection_proof.model_dump(mode="python"))
+    )
+    first_buy = None if proof is None else select_first_successful_buy(proof)
+    return PumpLiveSliceResult._create(
+        _factory_context=_LIVE_SLICE_FACTORY_CONTEXT,
+        provider_origin=provider.provider_origin,
+        profile=profile,
+        signature_page=signature_page,
+        frozen_upper_slot=upper,
+        frozen_upper_evidence=upper,
+        rpc_attempts=config.attempt_cap - budget[0],
+        attempt_cap=config.attempt_cap,
+        raw_binding_result="FAIL",
+        price_evidence_result="DEFERRED",
+        status=PumpQualificationStatus.INCONCLUSIVE,
+        selection_proof=proof,
+        first_buy=first_buy,
+    )
 
 
 async def qualify_pump_source(
@@ -445,8 +652,11 @@ async def qualify_pump_source(
 
 
 __all__ = [
+    "PumpLiveSliceConfig",
+    "PumpLiveSliceResult",
     "PumpQualificationConfig",
     "PumpQualificationReceipt",
     "PumpQualificationStatus",
+    "acquire_pump_live_slice",
     "qualify_pump_source",
 ]
