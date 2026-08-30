@@ -40,16 +40,18 @@ def _program_accounts(
 ) -> tuple[dict[str, object], dict[str, object]]:
     return (
         {
+            "context": {"slot": 1},
             "value": {
                 "owner": program_owner,
                 "data": {"parsed": {"type": "program", "info": {"programData": pointer}}},
-            }
+            },
         },
         {
+            "context": {"slot": 1},
             "value": {
                 "owner": programdata_owner,
                 "data": {"parsed": {"type": "programData", "info": {"slot": 1}}},
-            }
+            },
         },
     )
 

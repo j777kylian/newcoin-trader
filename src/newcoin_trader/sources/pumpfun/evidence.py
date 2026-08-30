@@ -99,7 +99,7 @@ class PumpRawProgramDataEvidence(_RevalidatingModel):
             ),
         )
 
-    def _metadata(self) -> tuple[str, int]:
+    def _metadata(self) -> tuple[str, int, int, int]:
         try:
             program = self.program_response["value"]
             programdata = self.programdata_response["value"]
@@ -109,13 +109,20 @@ class PumpRawProgramDataEvidence(_RevalidatingModel):
             programdata_state = programdata["data"]["parsed"]
             address = pointer["info"]["programData"]
             slot = programdata_state["info"]["slot"]
+            program_context_slot = self.program_response["context"]["slot"]
+            programdata_context_slot = self.programdata_response["context"]["slot"]
         except (KeyError, TypeError) as error:
             raise ValueError("raw Program/ProgramData account responses are incomplete") from error
         if program_owner != _UPGRADEABLE_LOADER or programdata_owner != _UPGRADEABLE_LOADER:
             raise ValueError("Program and ProgramData account owners must be the BPF Upgradeable Loader")
         if pointer["type"] != "program" or programdata_state["type"] != "programData":
             raise ValueError("raw account states must be Program and ProgramData")
-        return _signature(address, field="ProgramData pointer"), _index(slot, field="ProgramData deploy slot")
+        return (
+            _signature(address, field="ProgramData pointer"),
+            _index(slot, field="ProgramData deploy slot"),
+            _index(program_context_slot, field="Program account context slot"),
+            _index(programdata_context_slot, field="ProgramData account context slot"),
+        )
 
     @property
     def owner(self) -> str:
@@ -126,11 +133,16 @@ class PumpRawProgramDataEvidence(_RevalidatingModel):
     def last_deploy_slot(self) -> int:
         return self._metadata()[1]
 
+    @property
+    def context_slots(self) -> tuple[int, int]:
+        metadata = self._metadata()
+        return metadata[2], metadata[3]
+
     @model_validator(mode="after")
     def _bound(self) -> Self:
         if self.program_address != PUMP_PROGRAM_ADDRESS:
             raise ValueError("ProgramData program is invalid")
-        pointer, _ = self._metadata()
+        pointer, *_ = self._metadata()
         if self.programdata_address != pointer:
             raise ValueError("ProgramData pointer must equal queried ProgramData account")
         if self.raw_account_digest != _digest(
@@ -202,6 +214,16 @@ class PumpDecoderEvidence(_RevalidatingModel):
             if positions[0] == positions[1]:
                 raise ValueError("decoder role positions must be distinct")
         return self
+
+
+def pinned_pump_decoder_evidence() -> PumpDecoderEvidence:
+    """Return the fixed local decoder identity; live account binding remains separate."""
+    return PumpDecoderEvidence(
+        schema_version="pumpfun-decoder-v1",
+        program_address=PUMP_PROGRAM_ADDRESS,
+        raw_idl_response=json.loads(_SUPPORTED_DECODER_IDL_JSON),
+        idl_digest=_SUPPORTED_DECODER_DIGEST,
+    )
 
 
 class PumpQualifiedSourceProfile(_RevalidatingModel):
