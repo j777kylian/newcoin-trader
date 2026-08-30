@@ -161,6 +161,20 @@ def test_qualification_freezes_finalized_upper_slot_before_program_and_page_trav
     assert "SECRET" not in str(receipt)
 
 
+def test_qualification_waits_for_final_anchor_to_cover_retained_page() -> None:
+    responses = _qualification_responses()
+    responses[4] = _response(5, 100)
+    responses.append(_response(6, 101))
+    receipt = asyncio.run(
+        qualify_pump_source(
+            PumpRpcProvider("https://rpc.example.invalid", transport=FakeTransport(responses)),
+            config=PumpQualificationConfig(page_limit=1, max_pages=1, attempt_cap=9),
+        )
+    )
+    assert receipt.frozen_upper_slot == 101
+    assert receipt.rpc_attempts == 6
+
+
 def test_qualification_never_leaks_provider_response_or_exception_text() -> None:
     transport = FakeTransport(
         [
@@ -230,7 +244,8 @@ def test_qualification_rejects_programdata_context_or_deploy_slot_after_frozen_u
             "data": {"parsed": {"type": "programData", "info": {"slot": 102}}},
         },
     }
-    with pytest.raises(ValueError, match="evidence exceeds frozen finalized upper slot"):
+    responses.extend(_response(request_id, 101) for request_id in range(6, 10))
+    with pytest.raises(PumpRpcQualificationCapError, match="attempt cap exhausted"):
         asyncio.run(
             qualify_pump_source(
                 PumpRpcProvider("https://rpc.example.invalid", transport=FakeTransport(responses)),

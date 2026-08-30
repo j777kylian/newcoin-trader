@@ -408,13 +408,11 @@ async def qualify_pump_source(
         before=None, limit=config.page_limit, response=page_response
     )
     slots = tuple(_slot(record["slot"]) for record in page.records)
+    required_upper = max(pre_read_upper, programdata.last_deploy_slot, *programdata.context_slots, *slots)
     upper = _slot((await provider.call("getSlot", [{"commitment": "finalized"}], attempt_budget=budget)).result)
-    if (
-        upper < pre_read_upper
-        or programdata.last_deploy_slot > upper
-        or any(slot > upper for slot in programdata.context_slots)
-        or any(slot > upper for slot in slots)
-    ):
+    while upper < required_upper:
+        upper = _slot((await provider.call("getSlot", [{"commitment": "finalized"}], attempt_budget=budget)).result)
+    if upper < required_upper:
         raise ValueError("Pump qualification evidence exceeds frozen finalized upper slot")
     candidates = len(page.records)
     return PumpQualificationReceipt._create(
