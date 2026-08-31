@@ -44,7 +44,10 @@ class _Transport:
 
     async def post_json(self, endpoint: str, payload: dict[str, object], *, timeout_seconds: float) -> object:
         self.calls.append(payload)
-        return self.responses.pop(0)
+        response = self.responses.pop(0)
+        if isinstance(response, Exception):
+            raise response
+        return response
 
 
 def _response(request_id: int, data: list[object], token: str | None = None) -> dict[str, object]:
@@ -87,6 +90,10 @@ async def test_discovery_rejects_looping_token_and_out_of_window_row() -> None:
     out = _Transport([_response(1, [_row(source_time=120)])])
     with pytest.raises(HeliusIndexedError, match="outside"):
         await HeliusIndexedHistoryClient("https://example.test", transport=out).discover(protocol)
+    unsafe = _Transport([RuntimeError("https://host.example/path?api-key=SECRET")])
+    with pytest.raises(HeliusIndexedError) as error:
+        await HeliusIndexedHistoryClient("https://example.test", transport=unsafe).discover(protocol)
+    assert "SECRET" not in str(error.value)
 
 
 async def _noop() -> None:

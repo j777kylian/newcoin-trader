@@ -191,6 +191,7 @@ class HeliusIndexedPageReceipt(BaseModel):
     raw_count: int
     page_digest: str
     raw_transaction_identities: tuple[str, ...] = Field(repr=False)
+    raw_payload_digests: tuple[str, ...] = Field(repr=False)
     candidate_claims: tuple[IndexedPumpCandidateClaim, ...] = Field(repr=False)
 
     @model_validator(mode="after")
@@ -203,9 +204,9 @@ class HeliusIndexedPageReceipt(BaseModel):
             _hex_digest(self.response_token_digest)
         _index(self.page_index, "page index")
         _index(self.raw_count, "raw count")
-        if len(self.raw_transaction_identities) != self.raw_count:
-            raise ValueError("page raw transaction identities do not reconcile")
-        for identity in self.raw_transaction_identities:
+        if len(self.raw_transaction_identities) != self.raw_count or len(self.raw_payload_digests) != self.raw_count:
+            raise ValueError("page raw transaction commitments do not reconcile")
+        for identity in (*self.raw_transaction_identities, *self.raw_payload_digests):
             _hex_digest(identity)
         if len(set(self.raw_transaction_identities)) != len(self.raw_transaction_identities):
             raise ValueError("duplicate indexed transaction within page")
@@ -473,12 +474,14 @@ class HeliusIndexedHistoryClient:
                     }
                 )
             raw_transaction_identities = tuple(_digest(summary) for summary in summaries)
+            raw_payload_digests = tuple(_digest(row) for row in rows)
             page_digest = _digest(
                 {
                     "protocol": _PROTOCOL,
                     "query": protocol.query_digest,
                     "requestToken": request_token_digest,
                     "rows": summaries,
+                    "rawPayloadDigests": raw_payload_digests,
                 }
             )
             claims = tuple(
@@ -502,6 +505,7 @@ class HeliusIndexedHistoryClient:
                         "raw_count": len(rows),
                         "page_digest": page_digest,
                         "raw_transaction_identities": raw_transaction_identities,
+                        "raw_payload_digests": raw_payload_digests,
                         "candidate_claims": claims,
                     },
                     context=_FACTORY,
