@@ -109,6 +109,8 @@ def _validate_method_params(method: str, params: Sequence[object]) -> None:
             and isinstance(params[1], Mapping)
             and params[1].get("encoding") == "json"
             and params[1].get("transactionDetails") == "full"
+            and type(params[1].get("maxSupportedTransactionVersion")) is int
+            and params[1].get("maxSupportedTransactionVersion") == 0
         )
     else:  # getBlockTime has no commitment parameter.
         valid = len(params) == 1 and isinstance(params[0], int) and not isinstance(params[0], bool)

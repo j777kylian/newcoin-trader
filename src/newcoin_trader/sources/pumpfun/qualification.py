@@ -426,7 +426,15 @@ async def _classify_page(
         block_response = (
             await provider.call(
                 "getBlock",
-                [slot, {"commitment": "finalized", "encoding": "json", "transactionDetails": "full"}],
+                [
+                    slot,
+                    {
+                        "commitment": "finalized",
+                        "encoding": "json",
+                        "transactionDetails": "full",
+                        "maxSupportedTransactionVersion": 0,
+                    },
+                ],
                 attempt_budget=budget,
             )
         ).result

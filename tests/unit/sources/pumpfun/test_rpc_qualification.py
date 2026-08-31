@@ -93,6 +93,46 @@ def test_pump_rpc_allowlist_and_endpoint_origin_never_expose_path_or_query() -> 
     assert result.provider_origin == "https://rpc.example.invalid"
     assert transport.calls[0][0].endswith("secret-path?api=TOP_SECRET")
     assert "TOP_SECRET" not in str(result)
+    with pytest.raises(PumpRpcMethodError, match="requires finalized read-only parameters"):
+        asyncio.run(
+            provider.call(
+                "getBlock", [100, {"commitment": "finalized", "encoding": "json", "transactionDetails": "full"}]
+            )
+        )
+    for invalid_version in (False, 0.0):
+        with pytest.raises(PumpRpcMethodError, match="requires finalized read-only parameters"):
+            asyncio.run(
+                provider.call(
+                    "getBlock",
+                    [
+                        100,
+                        {
+                            "commitment": "finalized",
+                            "encoding": "json",
+                            "transactionDetails": "full",
+                            "maxSupportedTransactionVersion": invalid_version,
+                        },
+                    ],
+                )
+            )
+    block_provider = PumpRpcProvider("https://rpc.example.invalid", transport=FakeTransport([_response(1, {})]))
+    assert (
+        asyncio.run(
+            block_provider.call(
+                "getBlock",
+                [
+                    100,
+                    {
+                        "commitment": "finalized",
+                        "encoding": "json",
+                        "transactionDetails": "full",
+                        "maxSupportedTransactionVersion": 0,
+                    },
+                ],
+            )
+        ).result
+        == {}
+    )
     with pytest.raises(PumpRpcMethodError, match="unsupported RPC method"):
         asyncio.run(provider.call("sendTransaction", []))
     assert (
