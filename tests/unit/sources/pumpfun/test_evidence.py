@@ -236,6 +236,31 @@ def test_profile_rejects_fake_programdata_or_idl_content() -> None:
         profile.model_copy(update={"decoder": profile.decoder.model_copy(update={"raw_idl_response": {"fake": True}})})
 
 
+def test_parser_accepts_anchor_discriminator_with_instruction_arguments() -> None:
+    transaction = PumpRawTransactionEvidence.from_get_transaction(
+        signature=BUY,
+        commitment="finalized",
+        response={
+            "slot": 20,
+            "meta": {"err": None},
+            "transaction": {
+                "signatures": [BUY],
+                "message": {
+                    "instructions": [
+                        {
+                            "programId": PUMP_PROGRAM_ADDRESS,
+                            "data": "TQC5U4sttDH1Zpfx",
+                            "accounts": [UPPER, BUY, MINT, MARKET],
+                        }
+                    ]
+                },
+            },
+        },
+    )
+    fact = parse_pump_instruction(transaction, _decoder(), instruction_index=0)
+    assert (fact.instruction_kind, fact.mint) == ("create", MINT)
+
+
 def test_parser_rejects_arbitrary_two_account_instruction() -> None:
     transaction = PumpRawTransactionEvidence.from_get_transaction(
         signature=BUY,

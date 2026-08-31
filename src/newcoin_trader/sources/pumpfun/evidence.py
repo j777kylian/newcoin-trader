@@ -51,6 +51,21 @@ def _index(value: object, *, field: str) -> int:
     return value
 
 
+def _instruction_data_hex(value: object) -> str | None:
+    if not isinstance(value, str) or not value:
+        return None
+    if len(value) % 2 == 0 and all(character in "0123456789abcdef" for character in value):
+        return value
+    if any(character not in _BASE58 for character in value):
+        return None
+    number = 0
+    alphabet = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
+    for character in value:
+        number = number * 58 + alphabet.index(character)
+    raw = b"" if number == 0 else number.to_bytes((number.bit_length() + 7) // 8, "big")
+    return (b"\0" * (len(value) - len(value.lstrip("1"))) + raw).hex()
+
+
 def _utc_time(value: object, *, field: str) -> datetime:
     if not isinstance(value, datetime) or value.tzinfo is None or value.utcoffset() is None:
         raise ValueError(f"{field} must be timezone-aware")
@@ -490,7 +505,15 @@ def parse_pump_instruction(
     if not isinstance(raw, Mapping) or not transaction.meta_success:
         raise ValueError("failed or absent raw instruction")
     program, data, accounts = raw.get("programId"), raw.get("data"), raw.get("accounts")
-    kind = next((name for name, discriminator in _DISCRIMINATORS.items() if discriminator == data), None)
+    decoded_data = _instruction_data_hex(data)
+    kind = next(
+        (
+            name
+            for name, discriminator in _DISCRIMINATORS.items()
+            if decoded_data is not None and decoded_data.startswith(discriminator)
+        ),
+        None,
+    )
     if program != decoder.program_address or kind is None or not isinstance(accounts, list):
         raise ValueError("unsupported Pump raw instruction")
     mapping = decoder.role_mapping[kind]
