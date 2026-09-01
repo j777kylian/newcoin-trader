@@ -23,6 +23,7 @@ from newcoin_trader.sources.pumpfun.evidence import (
     PumpSignaturePage,
     VerifiedPumpLaunchUniverse,
     parse_pump_instruction,
+    pinned_pump_decoder_evidence,
     select_first_successful_buy,
 )
 
@@ -61,26 +62,44 @@ def _digest(value: object) -> str:
 
 
 def _decoder() -> PumpDecoderEvidence:
-    idl = {
-        "instructions": [
-            {
-                "name": kind,
-                "discriminator": discriminator,
-                "accounts": [{"name": "payer"}, {"name": "bondingCurve"}, {"name": "mint"}, {"name": "market"}],
-            }
-            for kind, discriminator in (
-                ("create", "181ec828051c0777"),
-                ("create_v2", "d6904cec5f8b31b4"),
-                ("buy", "66063d1201daebea"),
-            )
+    return pinned_pump_decoder_evidence()
+
+
+def _launch_accounts(*, v2: bool, mint: str = MINT) -> list[str]:
+    roles = [
+        mint,
+        "11111111111111111111111111111112",
+        MARKET,
+        "11111111111111111111111111111114",
+        "11111111111111111111111111111115",
+    ]
+    if v2:
+        return [
+            *roles,
+            "11111111111111111111111111111116",
+            "11111111111111111111111111111117",
+            "11111111111111111111111111111118",
+            "11111111111111111111111111111119",
+            "1111111111111111111111111111111A",
+            "1111111111111111111111111111111B",
+            "1111111111111111111111111111111C",
+            "1111111111111111111111111111111D",
+            "1111111111111111111111111111111E",
+            "1111111111111111111111111111111F",
+            "1111111111111111111111111111111G",
         ]
-    }
-    return PumpDecoderEvidence(
-        schema_version="pumpfun-decoder-v1",
-        program_address=PUMP_PROGRAM_ADDRESS,
-        raw_idl_response=idl,
-        idl_digest=_digest({"schema": "pumpfun-decoder-v1", "program": PUMP_PROGRAM_ADDRESS, "rawIdlResponse": idl}),
-    )
+    return [
+        *roles,
+        "11111111111111111111111111111116",
+        "11111111111111111111111111111117",
+        "11111111111111111111111111111118",
+        "11111111111111111111111111111119",
+        "1111111111111111111111111111111A",
+        "1111111111111111111111111111111B",
+        "1111111111111111111111111111111C",
+        "1111111111111111111111111111111D",
+        "1111111111111111111111111111111E",
+    ]
 
 
 def _profile() -> PumpQualifiedSourceProfile:
@@ -100,8 +119,10 @@ def _transaction(
 ) -> PumpRawTransactionEvidence:
     instruction = {
         "programId": PUMP_PROGRAM_ADDRESS,
-        "data": {"create": "181ec828051c0777", "buy": "66063d1201daebea"}[kind],
-        "accounts": [UPPER, BUY, mint, MARKET],
+        "data": {"create": "181ec828051c0777", "create_v2": "d6904cec5f8b31b4", "buy": "66063d1201daebea"}[kind],
+        "accounts": _launch_accounts(v2=kind == "create_v2", mint=mint)
+        if kind in {"create", "create_v2"}
+        else [UPPER, BUY, mint, MARKET],
     }
     return PumpRawTransactionEvidence.from_get_transaction(
         signature=signature,
@@ -236,6 +257,154 @@ def test_profile_rejects_fake_programdata_or_idl_content() -> None:
         profile.model_copy(update={"decoder": profile.decoder.model_copy(update={"raw_idl_response": {"fake": True}})})
 
 
+def test_create_v2_uses_authoritative_mint_role_not_bonding_curve() -> None:
+    authoritative_v2_accounts = {
+        "mint": MINT,
+        "mint_authority": "11111111111111111111111111111112",
+        "bonding_curve": "11111111111111111111111111111113",
+        "associated_bonding_curve": "11111111111111111111111111111114",
+        "global": "11111111111111111111111111111115",
+        "user": "11111111111111111111111111111116",
+        "system_program": "11111111111111111111111111111117",
+        "token_program": "11111111111111111111111111111118",
+        "associated_token_program": "11111111111111111111111111111119",
+        "mayhem_program_id": "1111111111111111111111111111111A",
+        "global_params": "1111111111111111111111111111111B",
+        "sol_vault": "1111111111111111111111111111111C",
+        "mayhem_state": "1111111111111111111111111111111D",
+        "mayhem_token_vault": "1111111111111111111111111111111E",
+        "event_authority": "1111111111111111111111111111111F",
+        "program": "1111111111111111111111111111111G",
+    }
+    transaction = PumpRawTransactionEvidence.from_get_transaction(
+        signature=BUY,
+        commitment="finalized",
+        response={
+            "slot": 20,
+            "meta": {"err": None},
+            "transaction": {
+                "signatures": [BUY],
+                "message": {
+                    "instructions": [
+                        {
+                            "programId": PUMP_PROGRAM_ADDRESS,
+                            "data": "d6904cec5f8b31b4",
+                            "accounts": list(authoritative_v2_accounts.values()),
+                        }
+                    ]
+                },
+            },
+        },
+    )
+    fact = parse_pump_instruction(transaction, _decoder(), instruction_index=0)
+    assert [account["name"] for account in _decoder().raw_idl_response["instructions"][1]["accounts"]] == list(
+        authoritative_v2_accounts
+    )
+    assert fact.mint == authoritative_v2_accounts["mint"]
+    assert fact.bonding_curve == authoritative_v2_accounts["bonding_curve"]
+    assert fact.associated_bonding_curve == authoritative_v2_accounts["associated_bonding_curve"]
+
+
+@pytest.mark.parametrize("kind", ("create", "create_v2"))
+def test_launch_decoders_bind_named_core_roles(kind: str) -> None:
+    fact = parse_pump_instruction(_transaction(BUY, 20, kind=kind), _decoder(), instruction_index=0)
+    assert (fact.mint, fact.bonding_curve, fact.associated_bonding_curve) == (
+        MINT,
+        MARKET,
+        "11111111111111111111111111111114",
+    )
+
+
+def test_create_v2_accepts_historical_19_account_layout_but_rejects_swapped_or_missing_core_roles() -> None:
+    accounts = [*_launch_accounts(v2=True), "1111111111111111111111111111111H"]
+    transaction = PumpRawTransactionEvidence.from_get_transaction(
+        signature=BUY,
+        commitment="finalized",
+        response={
+            "slot": 20,
+            "meta": {"err": None},
+            "transaction": {
+                "signatures": [BUY],
+                "message": {
+                    "instructions": [
+                        {"programId": PUMP_PROGRAM_ADDRESS, "data": "d6904cec5f8b31b4", "accounts": accounts}
+                    ]
+                },
+            },
+        },
+    )
+    assert parse_pump_instruction(transaction, _decoder(), instruction_index=0).mint == MINT
+    create_transaction = _transaction(BUY, 20, kind="create")
+    with pytest.raises(ValueError, match="account layout"):
+        parse_pump_instruction(
+            PumpRawTransactionEvidence.from_get_transaction(
+                signature=BUY,
+                commitment="finalized",
+                response={
+                    "slot": 20,
+                    "meta": {"err": None},
+                    "transaction": {
+                        "signatures": [BUY],
+                        "message": {
+                            "instructions": [
+                                {
+                                    "programId": PUMP_PROGRAM_ADDRESS,
+                                    "data": "181ec828051c0777",
+                                    "accounts": [
+                                        *create_transaction.message["instructions"][0]["accounts"],
+                                        accounts[-1],
+                                    ],
+                                }
+                            ]
+                        },
+                    },
+                },
+            ),
+            _decoder(),
+            instruction_index=0,
+        )
+    for malformed in (
+        accounts[:4],
+        accounts[:3] + [accounts[2]] + accounts[4:],
+        accounts[:3],
+    ):
+        malformed_transaction = PumpRawTransactionEvidence.from_get_transaction(
+            signature=BUY,
+            commitment="finalized",
+            response={
+                "slot": 20,
+                "meta": {"err": None},
+                "transaction": {
+                    "signatures": [BUY],
+                    "message": {
+                        "instructions": [
+                            {"programId": PUMP_PROGRAM_ADDRESS, "data": "d6904cec5f8b31b4", "accounts": malformed}
+                        ]
+                    },
+                },
+            },
+        )
+        with pytest.raises(ValueError, match="account layout"):
+            parse_pump_instruction(malformed_transaction, _decoder(), instruction_index=0)
+
+
+def test_candidate_rejects_tampered_copied_decoded_launch_fact() -> None:
+    candidate = _candidate(CREATE, 20, 0, kind="create")
+    forged = candidate.instruction_facts[0].model_copy(update={"mint": UPPER})
+    with pytest.raises(ValidationError, match="derived"):
+        candidate.model_copy(update={"instruction_facts": (forged,)})
+
+
+def test_candidate_revalidation_rejects_constructed_forged_launch_fact() -> None:
+    candidate = _candidate(CREATE, 20, 0, kind="create")
+    forged = candidate.instruction_facts[0].model_construct(
+        **{**candidate.instruction_facts[0].model_dump(), "mint": UPPER}
+    )
+    constructed = candidate.model_construct(**{**candidate.__dict__, "instruction_facts": (forged,)})
+    with pytest.raises(ValidationError, match="derived"):
+        type(candidate).model_validate(constructed)
+
+
 def test_parser_accepts_anchor_discriminator_with_instruction_arguments() -> None:
     transaction = PumpRawTransactionEvidence.from_get_transaction(
         signature=BUY,
@@ -250,7 +419,7 @@ def test_parser_accepts_anchor_discriminator_with_instruction_arguments() -> Non
                         {
                             "programId": PUMP_PROGRAM_ADDRESS,
                             "data": "TQC5U4sttDH1Zpfx",
-                            "accounts": [UPPER, BUY, MINT, MARKET],
+                            "accounts": _launch_accounts(v2=False),
                         }
                     ]
                 },

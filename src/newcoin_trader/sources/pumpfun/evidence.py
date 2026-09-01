@@ -19,13 +19,19 @@ _COMPLETENESS = "RESEARCH_GRADE_BOUNDED_COMPLETENESS_V1"
 _DISCRIMINATORS = {"create": "181ec828051c0777", "create_v2": "d6904cec5f8b31b4", "buy": "66063d1201daebea"}
 # Static supported decoder identity; live qualification must separately bind it to raw ProgramData/IDL evidence.
 _SUPPORTED_DECODER_IDL_JSON = (
-    '{"instructions":[{"accounts":[{"name":"payer"},{"name":"bondingCurve"},{"name":"mint"},{"name":"market"}],'
-    '"discriminator":"181ec828051c0777","name":"create"},{"accounts":[{"name":"payer"},{"name":"bondingCurve"},'
-    '{"name":"mint"},{"name":"market"}],"discriminator":"d6904cec5f8b31b4","name":"create_v2"},'
-    '{"accounts":[{"name":"payer"},{"name":"bondingCurve"},{"name":"mint"},{"name":"market"}],'
-    '"discriminator":"66063d1201daebea","name":"buy"}]}'
+    '{"instructions":[{"name":"create","discriminator":"181ec828051c0777","accounts":['
+    '{"name":"mint"},{"name":"mint_authority"},{"name":"bonding_curve"},{"name":"associated_bonding_curve"},'
+    '{"name":"global"},{"name":"mpl_token_metadata"},{"name":"metadata"},{"name":"user"},{"name":"system_program"},'
+    '{"name":"token_program"},{"name":"associated_token_program"},{"name":"rent"},'
+    '{"name":"event_authority"},{"name":"program"}]},{"name":"create_v2","discriminator":"d6904cec5f8b31b4",'
+    '"accounts":[{"name":"mint"},{"name":"mint_authority"},{"name":"bonding_curve"},'
+    '{"name":"associated_bonding_curve"},{"name":"global"},{"name":"user"},{"name":"system_program"},'
+    '{"name":"token_program"},{"name":"associated_token_program"},{"name":"mayhem_program_id"},'
+    '{"name":"global_params"},{"name":"sol_vault"},{"name":"mayhem_state"},{"name":"mayhem_token_vault"},'
+    '{"name":"event_authority"},{"name":"program"}]},{"name":"buy","discriminator":"66063d1201daebea",'
+    '"accounts":[{"name":"payer"},{"name":"bondingCurve"},{"name":"mint"},{"name":"market"}]}]}'
 )
-_SUPPORTED_DECODER_DIGEST = "b0dc2ac6f0c13c2068d8383d72f789aeee3014febea9cb8f2957a0302af32ef4"
+_SUPPORTED_DECODER_DIGEST = "9c394c5d303266f36bddb05c4aac84622515f30d55ea98c2b7e1afce5e65300b"
 
 
 def _canonical(value: object) -> Any:
@@ -198,15 +204,19 @@ class PumpDecoderEvidence(_RevalidatingModel):
                 _DISCRIMINATORS
             ):
                 raise ValueError("raw canonical IDL has ambiguous required discriminators")
-            mappings = {
-                instruction["name"]: {
-                    role: next(
-                        index for index, account in enumerate(instruction["accounts"]) if account["name"] == role
-                    )
-                    for role in ("mint", "market")
-                }
-                for instruction in selected
+            required_roles = {
+                "create": ("mint", "bonding_curve", "associated_bonding_curve"),
+                "create_v2": ("mint", "bonding_curve", "associated_bonding_curve"),
+                "buy": ("mint", "market"),
             }
+            mappings = {}
+            for instruction in selected:
+                kind = instruction["name"]
+                accounts = instruction["accounts"]
+                names = [account["name"] for account in accounts]
+                if len(names) != len(set(names)) or any(role not in names for role in required_roles[kind]):
+                    raise ValueError("raw canonical IDL lacks unique essential decoder roles")
+                mappings[kind] = {role: names.index(role) for role in required_roles[kind]}
         except (KeyError, StopIteration, TypeError) as error:
             raise ValueError("raw canonical IDL lacks decoder roles") from error
         if set(mappings) != set(_DISCRIMINATORS):
@@ -223,11 +233,16 @@ class PumpDecoderEvidence(_RevalidatingModel):
         ):
             raise ValueError("decoder must bind the pinned canonical IDL identity")
         for kind, mapping in self.role_mapping.items():
-            if set(mapping) != {"mint", "market"}:
-                raise ValueError("canonical IDL requires versioned mint/market role mapping")
-            positions = tuple(_index(mapping[role], field=f"{kind} {role} position") for role in ("mint", "market"))
-            if positions[0] == positions[1]:
-                raise ValueError("decoder role positions must be distinct")
+            expected = (
+                {"mint", "bonding_curve", "associated_bonding_curve"}
+                if kind in {"create", "create_v2"}
+                else {"mint", "market"}
+            )
+            if set(mapping) != expected:
+                raise ValueError("canonical IDL requires named essential role mapping")
+            positions = tuple(_index(position, field=f"{kind} role position") for position in mapping.values())
+            if len(positions) != len(set(positions)):
+                raise ValueError("decoder essential role positions must be distinct")
         return self
 
 
@@ -456,6 +471,8 @@ class PumpDecodedInstructionFact(_RevalidatingModel):
     program_address: str
     discriminator: str
     decoder_digest: str
+    bonding_curve: str | None = None
+    associated_bonding_curve: str | None = None
 
     @model_validator(mode="after")
     def _shape(self) -> Self:
@@ -470,6 +487,13 @@ class PumpDecodedInstructionFact(_RevalidatingModel):
             raise ValueError("decoded Pump schema is invalid")
         _signature(self.mint, field="mint")
         _signature(self.market, field="market")
+        if self.instruction_kind in {"create", "create_v2"}:
+            _signature(self.bonding_curve, field="bonding curve")
+            _signature(self.associated_bonding_curve, field="associated bonding curve")
+            if self.market != self.bonding_curve:
+                raise ValueError("launch market must bind bonding curve")
+        elif self.bonding_curve is not None or self.associated_bonding_curve is not None:
+            raise ValueError("buy cannot claim launch-only account roles")
         if len(self.raw_transaction_digest) != 64 or len(self.decoder_digest) != 64:
             raise ValueError("decoded evidence digest is invalid")
         return self
@@ -517,18 +541,35 @@ def parse_pump_instruction(
     if program != decoder.program_address or kind is None or not isinstance(accounts, list):
         raise ValueError("unsupported Pump raw instruction")
     mapping = decoder.role_mapping[kind]
-    required = max(mapping.values())
-    if len(accounts) <= required or any(
-        not isinstance(accounts[position], str) or not accounts[position] for position in mapping.values()
+    try:
+        required_account_count = len(
+            next(
+                instruction["accounts"]
+                for instruction in decoder.idl_content["instructions"]
+                if instruction["name"] == kind and instruction["discriminator"] == _DISCRIMINATORS[kind]
+            )
+        )
+    except (KeyError, StopIteration, TypeError) as error:
+        raise ValueError("unsupported Pump decoder layout") from error
+    if (
+        len(accounts) < required_account_count
+        or kind == "create"
+        and len(accounts) != required_account_count
+        or any(not isinstance(account, str) or not account for account in accounts[:required_account_count])
+        or any(not isinstance(accounts[position], str) or not accounts[position] for position in mapping.values())
+        or len({accounts[position] for position in mapping.values()}) != len(mapping)
     ):
         raise ValueError("unsupported Pump raw account layout")
+    launch_roles = mapping if kind in {"create", "create_v2"} else None
     return PumpDecodedInstructionFact(
         raw_transaction_digest=transaction.raw_payload_digest,
         instruction_index=instruction_index,
         inner_instruction_index=inner_instruction_index,
         instruction_kind=kind,
         mint=accounts[mapping["mint"]],
-        market=accounts[mapping["market"]],
+        market=accounts[mapping["bonding_curve"]] if launch_roles else accounts[mapping["market"]],
+        bonding_curve=accounts[mapping["bonding_curve"]] if launch_roles else None,
+        associated_bonding_curve=accounts[mapping["associated_bonding_curve"]] if launch_roles else None,
         program_address=cast(str, program),
         discriminator=cast(str, data),
         decoder_digest=decoder.idl_digest,
@@ -550,9 +591,19 @@ class PumpSignatureCandidate(_RevalidatingModel):
         _signature(self.signature)
         _index(self.slot, field="candidate slot")
         _index(self.transaction_index, field="transaction index")
-        transaction = PumpRawTransactionEvidence.model_validate(self.raw_transaction.model_dump(mode="python"))
-        block = PumpRawBlockEvidence.model_validate(self.raw_block.model_dump(mode="python"))
-        decoder = PumpDecoderEvidence.model_validate(self.decoder.model_dump(mode="python"))
+        transaction = PumpRawTransactionEvidence.model_validate(
+            self.raw_transaction.model_dump(mode="python")
+            if isinstance(self.raw_transaction, PumpRawTransactionEvidence)
+            else self.raw_transaction
+        )
+        block = PumpRawBlockEvidence.model_validate(
+            self.raw_block.model_dump(mode="python")
+            if isinstance(self.raw_block, PumpRawBlockEvidence)
+            else self.raw_block
+        )
+        decoder = PumpDecoderEvidence.model_validate(
+            self.decoder.model_dump(mode="python") if isinstance(self.decoder, PumpDecoderEvidence) else self.decoder
+        )
         if transaction.signature != self.signature:
             raise ValueError("candidate transaction signature mismatch")
         if transaction.slot != self.slot or block.slot != self.slot:
@@ -565,7 +616,10 @@ class PumpSignatureCandidate(_RevalidatingModel):
         ):
             raise ValueError("block membership/index does not bind candidate signature")
         facts = tuple(
-            PumpDecodedInstructionFact.model_validate(fact.model_dump(mode="python")) for fact in self.instruction_facts
+            PumpDecodedInstructionFact.model_validate(
+                fact.model_dump(mode="python") if isinstance(fact, PumpDecodedInstructionFact) else fact
+            )
+            for fact in self.instruction_facts
         )
         derived = tuple(
             parse_pump_instruction(
