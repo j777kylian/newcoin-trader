@@ -419,7 +419,10 @@ async def _classify_page(
         transaction_response = (
             await provider.call(
                 "getTransaction",
-                [signature, {"commitment": "finalized", "encoding": "jsonParsed"}],
+                [
+                    signature,
+                    {"commitment": "finalized", "encoding": "jsonParsed", "maxSupportedTransactionVersion": 0},
+                ],
                 attempt_budget=budget,
             )
         ).result

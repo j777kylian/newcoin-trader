@@ -277,6 +277,10 @@ def test_live_slice_fetches_only_capped_raw_evidence_and_preserves_unsupported_d
         "getBlock",
         "getSlot",
     ]
+    assert transport.calls[4][1]["params"] == [
+        SIGNATURE,
+        {"commitment": "finalized", "encoding": "jsonParsed", "maxSupportedTransactionVersion": 0},
+    ]
     assert [item.disposition.value for item in result.signature_page.classifications] == [
         "unsupported_or_no_relevant_instruction",
         "candidate_cap_reached",
