@@ -17,6 +17,7 @@ from newcoin_trader.sources.pumpfun.helius_indexed import (
     PumpCorpusV2WindowPlan,
     recover_pump_corpus_v2_source_manifest,
     write_pump_corpus_v2_source_manifest,
+    write_pump_corpus_v2_window_plan,
 )
 
 SIG = "3N5R8Zy6iDbeNqjR9JH4tt3FjhHVwLwWLCwT6mKrRj4D"
@@ -129,6 +130,7 @@ def test_corpus_v2_freeze_persists_mint_free_source_coordinates_for_fresh_recove
         ).discover(plan.protocols[0])
     )
 
+    plan_path = write_pump_corpus_v2_window_plan(tmp_path, plan=plan)
     manifest_path = write_pump_corpus_v2_source_manifest(tmp_path, plan=plan, discoveries=(result,))
     recovered_plan, recovered = recover_pump_corpus_v2_source_manifest(tmp_path)
     fresh = subprocess.run(
@@ -151,6 +153,7 @@ def test_corpus_v2_freeze_persists_mint_free_source_coordinates_for_fresh_recove
     )
     fresh_payload = json.loads(fresh.stdout)
 
+    assert plan_path.exists()
     assert recovered_plan.plan_digest == plan.plan_digest
     assert fresh_payload["plan"] == plan.plan_digest
     assert fresh_payload["coordinates"] == [item.model_dump(mode="json") for item in recovered.coordinates]
@@ -162,10 +165,13 @@ def test_corpus_v2_freeze_persists_mint_free_source_coordinates_for_fresh_recove
         PumpCorpusV2WindowPlan.model_validate(plan.model_dump(mode="python"))
     blocked = tmp_path / "blocked"
     blocked.mkdir()
+    with pytest.raises(ValueError, match="frozen window plan"):
+        write_pump_corpus_v2_source_manifest(blocked, plan=plan, discoveries=(result,))
+    assert not (blocked / "source_window_plan_v2.json").exists()
+    write_pump_corpus_v2_window_plan(blocked, plan=plan)
     (blocked / "source_coordinate_manifest_v2.json").write_text("occupied", encoding="utf-8")
     with pytest.raises(FileExistsError):
         write_pump_corpus_v2_source_manifest(blocked, plan=plan, discoveries=(result,))
-    assert not (blocked / "source_window_plan_v2.json").exists()
     with pytest.raises(FileExistsError):
         write_pump_corpus_v2_source_manifest(tmp_path, plan=plan, discoveries=(result,))
 

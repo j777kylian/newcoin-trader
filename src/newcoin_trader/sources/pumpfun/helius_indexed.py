@@ -783,14 +783,34 @@ def _create_only_json(path: Path, payload: object) -> Path:
     return path
 
 
+def _verified_corpus_v2_plan(plan: PumpCorpusV2WindowPlan) -> PumpCorpusV2WindowPlan:
+    if not isinstance(plan, PumpCorpusV2WindowPlan) or plan._factory_digest != plan.plan_digest:
+        raise ValueError("window plan lacks controlled construction evidence")
+    verified = PumpCorpusV2WindowPlan.model_validate(plan.model_dump(mode="python"), context=_FACTORY)
+    verified._factory_digest = verified.plan_digest
+    return verified
+
+
+def write_pump_corpus_v2_window_plan(root: Path, *, plan: PumpCorpusV2WindowPlan) -> Path:
+    """Freeze the return-independent source window plan before any provider request."""
+    verified = _verified_corpus_v2_plan(plan)
+    return _create_only_json(root / _CORPUS_V2_PLAN_FILE, verified.model_dump(mode="json"))
+
+
 def write_pump_corpus_v2_source_manifest(
     root: Path, *, plan: PumpCorpusV2WindowPlan, discoveries: tuple[HeliusIndexedDiscoveryResult, ...]
 ) -> Path:
     """Create immutable V2 plan/coordinates; refuses overwrite and drops decoded identities."""
-    if not isinstance(plan, PumpCorpusV2WindowPlan) or plan._factory_digest != plan.plan_digest:
-        raise ValueError("window plan lacks controlled construction evidence")
-    verified_plan = PumpCorpusV2WindowPlan.model_validate(plan.model_dump(mode="python"), context=_FACTORY)
-    verified_plan._factory_digest = verified_plan.plan_digest
+    verified_plan = _verified_corpus_v2_plan(plan)
+    plan_path = root / _CORPUS_V2_PLAN_FILE
+    try:
+        persisted_plan = PumpCorpusV2WindowPlan.model_validate(
+            json.loads(plan_path.read_text(encoding="utf-8")), context=_FACTORY
+        )
+    except (OSError, json.JSONDecodeError) as error:
+        raise ValueError("source manifest requires an already-frozen window plan") from error
+    if persisted_plan.plan_digest != verified_plan.plan_digest:
+        raise ValueError("source manifest does not match frozen window plan")
     if not discoveries:
         raise ValueError("source manifest requires discoveries")
     verified = tuple(
@@ -818,11 +838,9 @@ def write_pump_corpus_v2_source_manifest(
         {**payload, "manifest_digest": _digest(payload)}, context=_FACTORY
     )
     manifest._factory_digest = manifest.manifest_digest
-    plan_path = root / _CORPUS_V2_PLAN_FILE
     manifest_path = root / _CORPUS_V2_MANIFEST_FILE
-    if plan_path.exists() or manifest_path.exists():
-        raise FileExistsError("durable corpus V2 evidence path already exists")
-    _create_only_json(plan_path, verified_plan.model_dump(mode="json"))
+    if manifest_path.exists():
+        raise FileExistsError("durable corpus V2 manifest path already exists")
     return _create_only_json(manifest_path, manifest.model_dump(mode="json"))
 
 
@@ -858,4 +876,5 @@ __all__ = [
     "recover_pump_corpus_v2_source_manifest",
     "sanitize_helius_endpoint",
     "write_pump_corpus_v2_source_manifest",
+    "write_pump_corpus_v2_window_plan",
 ]
