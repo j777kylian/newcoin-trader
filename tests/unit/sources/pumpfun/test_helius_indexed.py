@@ -5,6 +5,7 @@ import subprocess
 import sys
 from datetime import UTC, datetime
 
+import httpx
 import pytest
 
 from newcoin_trader.sources.pumpfun.evidence import PUMP_PROGRAM_ADDRESS
@@ -100,6 +101,16 @@ async def test_discovery_binds_complete_pages_and_source_only_claims() -> None:
         HeliusIndexedDiscoveryResult.model_construct(**result.model_dump())
     with pytest.raises(ValueError, match="digest"):
         claim.model_copy(update={"slot": 21})
+
+
+@pytest.mark.asyncio
+async def test_discovery_retries_transient_transport_failure_within_frozen_attempt_cap() -> None:
+    transport = _Transport([httpx.ConnectError("transient transport failure"), _response(2, [])])
+    result = await HeliusIndexedHistoryClient(
+        "https://example.test", transport=transport, sleep=lambda _: _noop()
+    ).discover(HeliusIndexedPumpDiscoveryProtocolV1(window_start=100, window_end=120, max_attempts=2))
+    assert result.usage.attempts == 2
+    assert len(transport.calls) == 2
 
 
 @pytest.mark.asyncio

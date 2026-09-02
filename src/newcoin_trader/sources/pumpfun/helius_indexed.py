@@ -444,8 +444,15 @@ class HeliusIndexedHistoryClient:
                     timeout_seconds=self._timeout,
                 )
             except Exception as error:
+                retryable = isinstance(error, (httpx.TimeoutException, httpx.ConnectError)) or (
+                    isinstance(error, httpx.HTTPStatusError)
+                    and (error.response.status_code == 429 or error.response.status_code >= 500)
+                )
                 if isinstance(error, httpx.HTTPStatusError) and error.response.status_code == 429:
                     rate_limits += 1
+                if retryable and attempts < protocol.max_attempts:
+                    await self._sleep(0.25 * attempts)
+                    continue
                 raise HeliusIndexedError("Helius indexed transport failure") from None
             if (
                 not isinstance(raw, Mapping)
