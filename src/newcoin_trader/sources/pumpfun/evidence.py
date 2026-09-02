@@ -403,15 +403,19 @@ class PumpRawBlockEvidence(_RevalidatingModel):
 
     @classmethod
     def from_get_block(cls, *, slot: int, commitment: str, response: Mapping[str, object]) -> Self:
-        rows = response.get("transactions")
-        if not isinstance(rows, list):
-            raise ValueError("getBlock response lacks transactions")
-        signatures = []
-        for row in rows:
-            try:
-                signatures.append(row["transaction"]["signatures"][0])
-            except (KeyError, IndexError, TypeError) as error:
-                raise ValueError("getBlock transaction lacks primary signature") from error
+        raw_signatures = response.get("signatures")
+        if isinstance(raw_signatures, list):
+            signatures = raw_signatures
+        else:
+            rows = response.get("transactions")
+            if not isinstance(rows, list):
+                raise ValueError("getBlock response lacks ordered signatures")
+            signatures = []
+            for row in rows:
+                try:
+                    signatures.append(row["transaction"]["signatures"][0])
+                except (KeyError, IndexError, TypeError) as error:
+                    raise ValueError("getBlock transaction lacks primary signature") from error
         header = {key: response.get(key) for key in ("blockhash", "previousBlockhash", "blockHeight", "blockTime")}
         return cls(
             slot=slot,
@@ -571,7 +575,7 @@ def parse_pump_instruction(
         bonding_curve=accounts[mapping["bonding_curve"]] if launch_roles else None,
         associated_bonding_curve=accounts[mapping["associated_bonding_curve"]] if launch_roles else None,
         program_address=cast(str, program),
-        discriminator=cast(str, data),
+        discriminator=_DISCRIMINATORS[kind],
         decoder_digest=decoder.idl_digest,
     )
 

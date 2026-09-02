@@ -434,7 +434,7 @@ async def _classify_page(
                     {
                         "commitment": "finalized",
                         "encoding": "json",
-                        "transactionDetails": "full",
+                        "transactionDetails": "signatures",
                         "maxSupportedTransactionVersion": 0,
                     },
                 ],
