@@ -1,5 +1,10 @@
 from __future__ import annotations
 
+import json
+import subprocess
+import sys
+from datetime import UTC, datetime
+
 import pytest
 
 from newcoin_trader.sources.pumpfun.evidence import PUMP_PROGRAM_ADDRESS
@@ -9,6 +14,9 @@ from newcoin_trader.sources.pumpfun.helius_indexed import (
     HeliusIndexedHistoryClient,
     HeliusIndexedPumpDiscoveryProtocolV1,
     IndexedPumpCandidateClaim,
+    PumpCorpusV2WindowPlan,
+    recover_pump_corpus_v2_source_manifest,
+    write_pump_corpus_v2_source_manifest,
 )
 
 SIG = "3N5R8Zy6iDbeNqjR9JH4tt3FjhHVwLwWLCwT6mKrRj4D"
@@ -109,6 +117,57 @@ async def test_discovery_rejects_looping_token_and_out_of_window_row() -> None:
     with pytest.raises(HeliusIndexedError) as error:
         await HeliusIndexedHistoryClient("https://example.test", transport=unsafe).discover(protocol)
     assert "SECRET" not in str(error.value)
+
+
+def test_corpus_v2_freeze_persists_mint_free_source_coordinates_for_fresh_recovery(tmp_path) -> None:
+    plan = PumpCorpusV2WindowPlan.freeze(reference_time=datetime(2026, 9, 1, 12, tzinfo=UTC), extension_blocks=2)
+    result = __import__("asyncio").run(
+        HeliusIndexedHistoryClient(
+            "https://example.test/private",
+            transport=_Transport([_response(1, [_row(source_time=plan.protocols[0].window_start)])]),
+            sleep=lambda _: _noop(),
+        ).discover(plan.protocols[0])
+    )
+
+    manifest_path = write_pump_corpus_v2_source_manifest(tmp_path, plan=plan, discoveries=(result,))
+    recovered_plan, recovered = recover_pump_corpus_v2_source_manifest(tmp_path)
+    fresh = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            (
+                "import json,sys; from pathlib import Path; "
+                "from newcoin_trader.sources.pumpfun.helius_indexed import recover_pump_corpus_v2_source_manifest; "
+                "plan,manifest=recover_pump_corpus_v2_source_manifest(Path(sys.argv[1])); "
+                "payload={'plan': plan.plan_digest, "
+                "'coordinates': [item.model_dump(mode='json') for item in manifest.coordinates]}; "
+                "print(json.dumps(payload))"
+            ),
+            str(tmp_path),
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    fresh_payload = json.loads(fresh.stdout)
+
+    assert recovered_plan.plan_digest == plan.plan_digest
+    assert fresh_payload["plan"] == plan.plan_digest
+    assert fresh_payload["coordinates"] == [item.model_dump(mode="json") for item in recovered.coordinates]
+    assert recovered.manifest_digest
+    assert recovered.coordinates[0].signature == SIG
+    assert recovered.coordinates[0].source_time == plan.protocols[0].window_start
+    assert "mint" not in manifest_path.read_text(encoding="utf-8").lower()
+    with pytest.raises(ValueError, match="controlled construction"):
+        PumpCorpusV2WindowPlan.model_validate(plan.model_dump(mode="python"))
+    blocked = tmp_path / "blocked"
+    blocked.mkdir()
+    (blocked / "source_coordinate_manifest_v2.json").write_text("occupied", encoding="utf-8")
+    with pytest.raises(FileExistsError):
+        write_pump_corpus_v2_source_manifest(blocked, plan=plan, discoveries=(result,))
+    assert not (blocked / "source_window_plan_v2.json").exists()
+    with pytest.raises(FileExistsError):
+        write_pump_corpus_v2_source_manifest(tmp_path, plan=plan, discoveries=(result,))
 
 
 async def _noop() -> None:

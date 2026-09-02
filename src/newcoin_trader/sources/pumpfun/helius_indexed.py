@@ -6,7 +6,8 @@ import asyncio
 import hashlib
 import json
 from collections.abc import Awaitable, Callable, Mapping
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from typing import Any, Protocol, Self, cast
 from urllib.parse import urlsplit, urlunsplit
 
@@ -544,6 +545,305 @@ class HeliusIndexedHistoryClient:
         )
 
 
+_CORPUS_V2_PLAN_FILE = "source_window_plan_v2.json"
+_CORPUS_V2_MANIFEST_FILE = "source_coordinate_manifest_v2.json"
+_CORPUS_V2_PLAN_VERSION = "PumpCorpusV2WindowPlanV1"
+_CORPUS_V2_MANIFEST_VERSION = "PumpCorpusV2SourceCoordinateManifestV1"
+
+
+class PumpCorpusV2WindowPlan(BaseModel):
+    """Frozen, return-independent historical windows; no decoded identities."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+    version: str
+    reference_time: datetime
+    protocols: tuple[HeliusIndexedPumpDiscoveryProtocolV1, ...]
+    plan_digest: str
+    _factory_digest: str | None = PrivateAttr(default=None)
+
+    @classmethod
+    def model_construct(cls, _fields_set: set[str] | None = None, **values: Any) -> Self:
+        raise TypeError("PumpCorpusV2WindowPlan.model_construct is not a public construction boundary")
+
+    def model_copy(self, *, update: Mapping[str, Any] | None = None, deep: bool = False) -> Self:
+        if self._factory_digest != self.plan_digest:
+            raise ValueError("window plan lacks controlled construction evidence")
+        rebuilt = type(self).model_validate(
+            self.model_dump(mode="python") if update is None else {**self.model_dump(mode="python"), **update},
+            context=_FACTORY,
+        )
+        if rebuilt.plan_digest != self._factory_digest:
+            raise ValueError("window plan factory binding mismatch")
+        rebuilt._factory_digest = self._factory_digest
+        return rebuilt
+
+    @classmethod
+    def freeze(cls, *, reference_time: datetime, extension_blocks: int = 100) -> Self:
+        if reference_time.tzinfo is None or reference_time.utcoffset() != timedelta(0):
+            raise ValueError("reference time must be UTC")
+        if reference_time != reference_time.replace(minute=0, second=0, microsecond=0):
+            raise ValueError("reference time must be an exact UTC hour")
+        if type(extension_blocks) is not int or not 1 <= extension_blocks <= 100:
+            raise ValueError("extension blocks must be in 1..100")
+        protocols = tuple(
+            HeliusIndexedPumpDiscoveryProtocolV1(
+                window_start=int((reference_time - timedelta(days=age, seconds=90 * (block + 1))).timestamp()),
+                window_end=int((reference_time - timedelta(days=age, seconds=90 * block)).timestamp()),
+            )
+            for block in range(extension_blocks)
+            for age in (3, 7, 14)
+        )
+        payload = {
+            "version": _CORPUS_V2_PLAN_VERSION,
+            "reference_time": reference_time.isoformat(),
+            "protocols": [p.model_dump(mode="json") for p in protocols],
+        }
+        result = cls.model_validate(
+            {
+                "version": _CORPUS_V2_PLAN_VERSION,
+                "reference_time": reference_time,
+                "protocols": protocols,
+                "plan_digest": _digest(payload),
+            },
+            context=_FACTORY,
+        )
+        result._factory_digest = result.plan_digest
+        return result
+
+    @model_validator(mode="after")
+    def _bound(self, info: ValidationInfo) -> Self:
+        if info.context is not _FACTORY:
+            raise ValueError("window plan requires controlled construction")
+        if self.version != _CORPUS_V2_PLAN_VERSION:
+            raise ValueError("unsupported corpus V2 window plan")
+        if self.reference_time.tzinfo is None or self.reference_time.utcoffset() != timedelta(0):
+            raise ValueError("reference time must be UTC")
+        if self.reference_time != self.reference_time.replace(minute=0, second=0, microsecond=0):
+            raise ValueError("reference time must be an exact UTC hour")
+        if not self.protocols or len({item.query_digest for item in self.protocols}) != len(self.protocols):
+            raise ValueError("window plan protocols must be unique and non-empty")
+        payload = {
+            "version": self.version,
+            "reference_time": self.reference_time.isoformat(),
+            "protocols": [p.model_dump(mode="json") for p in self.protocols],
+        }
+        if self.plan_digest != _digest(payload):
+            raise ValueError("window plan digest does not bind content")
+        return self
+
+
+class PumpCorpusV2SourceCoordinate(BaseModel):
+    """Source coordinate only: deliberately no decoded identity fields."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+    window_query_digest: str
+    page_digest: str
+    signature: str
+    slot: int
+    transaction_index: int
+    instruction_index: int
+    inner_instruction_index: int | None = None
+    source_time: int
+    method: str
+    coordinate_digest: str
+
+    @model_validator(mode="after")
+    def _bound(self) -> Self:
+        _hex_digest(self.window_query_digest)
+        _hex_digest(self.page_digest)
+        _signature(self.signature)
+        for value, field in (
+            (self.slot, "slot"),
+            (self.transaction_index, "transaction index"),
+            (self.instruction_index, "instruction index"),
+            (self.source_time, "source time"),
+        ):
+            _index(value, field)
+        if self.inner_instruction_index is not None:
+            _index(self.inner_instruction_index, "inner instruction index")
+        if self.method not in {"create", "create_v2"}:
+            raise ValueError("source coordinate method is invalid")
+        payload = self.model_dump(exclude={"coordinate_digest"})
+        if self.coordinate_digest != _digest(payload):
+            raise ValueError("source coordinate digest does not bind content")
+        return self
+
+    @classmethod
+    def from_claim(cls, claim: IndexedPumpCandidateClaim) -> Self:
+        payload = {
+            "window_query_digest": claim.query_digest,
+            "page_digest": claim.page_digest,
+            "signature": claim.signature,
+            "slot": claim.slot,
+            "transaction_index": claim.transaction_index,
+            "instruction_index": claim.instruction_index,
+            "inner_instruction_index": claim.inner_instruction_index,
+            "source_time": claim.source_time,
+            "method": claim.method,
+        }
+        return cls.model_validate({**payload, "coordinate_digest": _digest(payload)})
+
+
+class PumpCorpusV2SourceManifest(BaseModel):
+    """Digest-bound consumed-row and coordinate evidence, independent of decoder output."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+    version: str
+    plan_digest: str
+    windows: tuple[dict[str, object], ...]
+    coordinates: tuple[PumpCorpusV2SourceCoordinate, ...]
+    manifest_digest: str
+    _factory_digest: str | None = PrivateAttr(default=None)
+
+    @classmethod
+    def model_construct(cls, _fields_set: set[str] | None = None, **values: Any) -> Self:
+        raise TypeError("PumpCorpusV2SourceManifest.model_construct is not a public construction boundary")
+
+    def model_copy(self, *, update: Mapping[str, Any] | None = None, deep: bool = False) -> Self:
+        if self._factory_digest != self.manifest_digest:
+            raise ValueError("source manifest lacks controlled construction evidence")
+        rebuilt = type(self).model_validate(
+            self.model_dump(mode="python") if update is None else {**self.model_dump(mode="python"), **update},
+            context=_FACTORY,
+        )
+        if rebuilt.manifest_digest != self._factory_digest:
+            raise ValueError("source manifest factory binding mismatch")
+        rebuilt._factory_digest = self._factory_digest
+        return rebuilt
+
+    @model_validator(mode="after")
+    def _bound(self, info: ValidationInfo) -> Self:
+        if info.context is not _FACTORY:
+            raise ValueError("source manifest requires controlled construction")
+        if self.version != _CORPUS_V2_MANIFEST_VERSION:
+            raise ValueError("unsupported corpus V2 source manifest")
+        _hex_digest(self.plan_digest)
+        if not self.windows:
+            raise ValueError("source manifest requires consumed windows")
+        window_digests = tuple(item.get("query_digest") for item in self.windows)
+        if any(not isinstance(item, str) for item in window_digests) or len(set(window_digests)) != len(window_digests):
+            raise ValueError("source manifest window receipts are invalid")
+        for window in self.windows:
+            if set(window) != {
+                "query_digest",
+                "terminal_proof",
+                "raw_transaction_count",
+                "candidate_set_digest",
+                "page_receipts",
+            }:
+                raise ValueError("source manifest window shape is invalid")
+            _hex_digest(window["query_digest"])
+            _hex_digest(window["candidate_set_digest"])
+            _index(window["raw_transaction_count"], "raw transaction count")
+            if window["terminal_proof"] != "null_paginationToken" or not isinstance(window["page_receipts"], list):
+                raise ValueError("source manifest window terminal proof is invalid")
+        coordinates = tuple(
+            PumpCorpusV2SourceCoordinate.model_validate(item.model_dump(mode="python")) for item in self.coordinates
+        )
+        identities = tuple(
+            (item.signature, item.slot, item.transaction_index, item.instruction_index, item.inner_instruction_index)
+            for item in coordinates
+        )
+        if len(identities) != len(set(identities)):
+            raise ValueError("source manifest contains duplicate coordinates")
+        if any(item.window_query_digest not in window_digests for item in coordinates):
+            raise ValueError("source coordinate lacks retained window receipt")
+        payload = self.model_dump(exclude={"manifest_digest"}, mode="json")
+        if self.manifest_digest != _digest(payload):
+            raise ValueError("source manifest digest does not bind content")
+        return self
+
+
+def _source_window_receipt(result: HeliusIndexedDiscoveryResult) -> dict[str, object]:
+    return {
+        "query_digest": result.protocol.query_digest,
+        "terminal_proof": result.terminal_proof,
+        "raw_transaction_count": result.raw_transaction_count,
+        "candidate_set_digest": result.candidate_set_digest,
+        "page_receipts": [
+            {
+                "page_index": page.page_index,
+                "request_token_digest": page.request_token_digest,
+                "response_token_digest": page.response_token_digest,
+                "raw_count": page.raw_count,
+                "page_digest": page.page_digest,
+                "raw_transaction_identities": list(page.raw_transaction_identities),
+                "raw_payload_digests": list(page.raw_payload_digests),
+            }
+            for page in result.pages
+        ],
+    }
+
+
+def _create_only_json(path: Path, payload: object) -> Path:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"), allow_nan=False) + "\n"
+    with path.open("x", encoding="utf-8") as handle:
+        handle.write(encoded)
+    return path
+
+
+def write_pump_corpus_v2_source_manifest(
+    root: Path, *, plan: PumpCorpusV2WindowPlan, discoveries: tuple[HeliusIndexedDiscoveryResult, ...]
+) -> Path:
+    """Create immutable V2 plan/coordinates; refuses overwrite and drops decoded identities."""
+    if not isinstance(plan, PumpCorpusV2WindowPlan) or plan._factory_digest != plan.plan_digest:
+        raise ValueError("window plan lacks controlled construction evidence")
+    verified_plan = PumpCorpusV2WindowPlan.model_validate(plan.model_dump(mode="python"), context=_FACTORY)
+    verified_plan._factory_digest = verified_plan.plan_digest
+    if not discoveries:
+        raise ValueError("source manifest requires discoveries")
+    verified = tuple(
+        HeliusIndexedDiscoveryResult.model_validate(item.model_dump(mode="python"), context=_FACTORY)
+        for item in discoveries
+    )
+    allowed = {item.query_digest for item in verified_plan.protocols}
+    if any(item.protocol.query_digest not in allowed for item in verified):
+        raise ValueError("discovery does not belong to frozen window plan")
+    if len({item.protocol.query_digest for item in verified}) != len(verified):
+        raise ValueError("source manifest has duplicate window discovery")
+    coordinates = tuple(
+        PumpCorpusV2SourceCoordinate.from_claim(claim)
+        for result in verified
+        for page in result.pages
+        for claim in page.candidate_claims
+    )
+    payload = {
+        "version": _CORPUS_V2_MANIFEST_VERSION,
+        "plan_digest": verified_plan.plan_digest,
+        "windows": [_source_window_receipt(item) for item in verified],
+        "coordinates": [item.model_dump(mode="json") for item in coordinates],
+    }
+    manifest = PumpCorpusV2SourceManifest.model_validate(
+        {**payload, "manifest_digest": _digest(payload)}, context=_FACTORY
+    )
+    manifest._factory_digest = manifest.manifest_digest
+    plan_path = root / _CORPUS_V2_PLAN_FILE
+    manifest_path = root / _CORPUS_V2_MANIFEST_FILE
+    if plan_path.exists() or manifest_path.exists():
+        raise FileExistsError("durable corpus V2 evidence path already exists")
+    _create_only_json(plan_path, verified_plan.model_dump(mode="json"))
+    return _create_only_json(manifest_path, manifest.model_dump(mode="json"))
+
+
+def recover_pump_corpus_v2_source_manifest(root: Path) -> tuple[PumpCorpusV2WindowPlan, PumpCorpusV2SourceManifest]:
+    """Fresh-process recovery boundary; only durable JSON may supply V2 windows/coordinates."""
+    try:
+        plan = PumpCorpusV2WindowPlan.model_validate(
+            json.loads((root / _CORPUS_V2_PLAN_FILE).read_text(encoding="utf-8")), context=_FACTORY
+        )
+        manifest = PumpCorpusV2SourceManifest.model_validate(
+            json.loads((root / _CORPUS_V2_MANIFEST_FILE).read_text(encoding="utf-8")), context=_FACTORY
+        )
+    except (OSError, json.JSONDecodeError) as error:
+        raise ValueError("durable corpus V2 evidence is unreadable") from error
+    if manifest.plan_digest != plan.plan_digest:
+        raise ValueError("source manifest does not bind recovered window plan")
+    plan._factory_digest = plan.plan_digest
+    manifest._factory_digest = manifest.manifest_digest
+    return plan, manifest
+
+
 __all__ = [
     "HeliusIndexedDiscoveryResult",
     "HeliusIndexedError",
@@ -552,5 +852,10 @@ __all__ = [
     "HeliusIndexedPumpDiscoveryProtocolV1",
     "HeliusIndexedUsageLedger",
     "IndexedPumpCandidateClaim",
+    "PumpCorpusV2SourceCoordinate",
+    "PumpCorpusV2SourceManifest",
+    "PumpCorpusV2WindowPlan",
+    "recover_pump_corpus_v2_source_manifest",
     "sanitize_helius_endpoint",
+    "write_pump_corpus_v2_source_manifest",
 ]

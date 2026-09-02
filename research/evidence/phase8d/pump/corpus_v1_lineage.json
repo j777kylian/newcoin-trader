@@ -1,0 +1,15 @@
+{
+  "artifact_type": "PUMP_PHASE8D_CORPUS_LINEAGE_V1",
+  "candidate_digest": "f70a05ba2225b1ded365fae6b6b3d03e0aa6a21b3bb148db0c20409524a5dafe",
+  "source_window_digest": "06f22e1ef99e235806e029001186a4d282a4452e6997f5fad55eda784ba8af34",
+  "status": "REJECTED",
+  "rejection_reasons": [
+    "CREATE_V2_ACCOUNT_ROLE_MAPPING_DEFECT",
+    "FROZEN_SOURCE_COORDINATE_MANIFEST_NOT_RETAINED",
+    "EXACT_A_B_C_WINDOW_TIMESTAMPS_NOT_RECOVERABLE"
+  ],
+  "limits": [
+    "Lineage metadata only; exact V1 source windows are unrecoverable.",
+    "This artifact does not correct, re-label, or promote V1 semantic identities."
+  ]
+}
