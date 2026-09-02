@@ -122,8 +122,8 @@ def _transaction(
         "data": {
             "create": "181ec828051c0777",
             "create_v2": "d6904cec5f8b31b4",
-            "buy": "66063d1201daebea",
-            "sell": "33e685a4017f83ad",
+            "buy": "66063d1201daebea40420f000000000000ca9a3b00000000",
+            "sell": "33e685a4017f83ad40420f00000000000000000000000000",
         }[kind],
         "accounts": _launch_accounts(v2=kind == "create_v2", mint=mint)
         if kind in {"create", "create_v2"}
@@ -244,6 +244,14 @@ def test_sell_instruction_decodes_mint_and_market_not_launch_roles() -> None:
     assert fact.market == MARKET
     assert fact.bonding_curve is None
     assert fact.associated_bonding_curve is None
+    assert fact.token_amount == 1_000_000
+
+
+def test_buy_instruction_decodes_trade_amount() -> None:
+    transaction = _transaction(BUY, 20, kind="buy", mint=MINT)
+    fact = parse_pump_instruction(transaction, _decoder(), instruction_index=0)
+    assert fact.instruction_kind == "buy"
+    assert fact.token_amount == 1_000_000
 
 
 def test_candidate_rejects_response_signature_different_from_candidate() -> None:

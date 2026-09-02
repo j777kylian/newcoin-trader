@@ -79,6 +79,17 @@ def _instruction_data_hex(value: object) -> str | None:
     return (b"\0" * (len(value) - len(value.lstrip("1"))) + raw).hex()
 
 
+def decode_pump_trade_amount(hexdata: object) -> int | None:
+    """Extract the u64 little-endian token amount from Pump buy/sell instruction data."""
+    if (
+        not isinstance(hexdata, str)
+        or len(hexdata) < 32
+        or any(character not in "0123456789abcdef" for character in hexdata)
+    ):
+        return None
+    return int.from_bytes(bytes.fromhex(hexdata[16:32]), "little")
+
+
 def _utc_time(value: object, *, field: str) -> datetime:
     if not isinstance(value, datetime) or value.tzinfo is None or value.utcoffset() is None:
         raise ValueError(f"{field} must be timezone-aware")
@@ -485,6 +496,7 @@ class PumpDecodedInstructionFact(_RevalidatingModel):
     decoder_digest: str
     bonding_curve: str | None = None
     associated_bonding_curve: str | None = None
+    token_amount: int | None = None
 
     @model_validator(mode="after")
     def _shape(self) -> Self:
@@ -504,8 +516,14 @@ class PumpDecodedInstructionFact(_RevalidatingModel):
             _signature(self.associated_bonding_curve, field="associated bonding curve")
             if self.market != self.bonding_curve:
                 raise ValueError("launch market must bind bonding curve")
+            if self.token_amount is not None:
+                raise ValueError("launch instruction cannot carry a trade amount")
         elif self.bonding_curve is not None or self.associated_bonding_curve is not None:
             raise ValueError("buy cannot claim launch-only account roles")
+        elif self.token_amount is None:
+            raise ValueError("buy/sell instruction requires a decoded trade amount")
+        elif isinstance(self.token_amount, bool) or not isinstance(self.token_amount, int) or self.token_amount < 0:
+            raise ValueError("trade amount must be a non-negative integer")
         if len(self.raw_transaction_digest) != 64 or len(self.decoder_digest) != 64:
             raise ValueError("decoded evidence digest is invalid")
         return self
@@ -585,6 +603,7 @@ def parse_pump_instruction(
         program_address=cast(str, program),
         discriminator=_DISCRIMINATORS[kind],
         decoder_digest=decoder.idl_digest,
+        token_amount=decode_pump_trade_amount(decoded_data) if kind in {"buy", "sell"} else None,
     )
 
 

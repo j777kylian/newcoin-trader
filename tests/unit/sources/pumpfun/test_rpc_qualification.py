@@ -385,7 +385,7 @@ def _live_buy_responses() -> list[object]:
         ],
     )
     return responses[:4] + [
-        _response(5, transaction(buy, 99, "66063d1201daebea")),
+        _response(5, transaction(buy, 99, "66063d1201daebea40420f000000000000ca9a3b00000000")),
         _response(6, block(buy, 99)),
         _response(7, transaction(create, 98, "181ec828051c0777")),
         _response(8, block(create, 98)),
