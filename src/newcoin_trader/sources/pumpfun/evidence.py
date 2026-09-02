@@ -16,7 +16,12 @@ PUMP_PROGRAM_ADDRESS = "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P"
 _UPGRADEABLE_LOADER = "BPFLoaderUpgradeab1e11111111111111111111111"
 _SOURCE_VERSION = "pumpfun-programdata-v0.1.0"
 _COMPLETENESS = "RESEARCH_GRADE_BOUNDED_COMPLETENESS_V1"
-_DISCRIMINATORS = {"create": "181ec828051c0777", "create_v2": "d6904cec5f8b31b4", "buy": "66063d1201daebea"}
+_DISCRIMINATORS = {
+    "create": "181ec828051c0777",
+    "create_v2": "d6904cec5f8b31b4",
+    "buy": "66063d1201daebea",
+    "sell": "33e685a4017f83ad",
+}
 # Static supported decoder identity; live qualification must separately bind it to raw ProgramData/IDL evidence.
 _SUPPORTED_DECODER_IDL_JSON = (
     '{"instructions":[{"name":"create","discriminator":"181ec828051c0777","accounts":['
@@ -29,9 +34,11 @@ _SUPPORTED_DECODER_IDL_JSON = (
     '{"name":"token_program"},{"name":"associated_token_program"},{"name":"mayhem_program_id"},'
     '{"name":"global_params"},{"name":"sol_vault"},{"name":"mayhem_state"},{"name":"mayhem_token_vault"},'
     '{"name":"event_authority"},{"name":"program"}]},{"name":"buy","discriminator":"66063d1201daebea",'
+    '"accounts":[{"name":"payer"},{"name":"bondingCurve"},{"name":"mint"},{"name":"market"}]},'
+    '{"name":"sell","discriminator":"33e685a4017f83ad",'
     '"accounts":[{"name":"payer"},{"name":"bondingCurve"},{"name":"mint"},{"name":"market"}]}]}'
 )
-_SUPPORTED_DECODER_DIGEST = "9c394c5d303266f36bddb05c4aac84622515f30d55ea98c2b7e1afce5e65300b"
+_SUPPORTED_DECODER_DIGEST = "911684ba3a56cc0c222f1682e346646866d3c4746f091d7f6c9ffa32e5631bf1"
 
 
 def _canonical(value: object) -> Any:
@@ -208,6 +215,7 @@ class PumpDecoderEvidence(_RevalidatingModel):
                 "create": ("mint", "bonding_curve", "associated_bonding_curve"),
                 "create_v2": ("mint", "bonding_curve", "associated_bonding_curve"),
                 "buy": ("mint", "market"),
+                "sell": ("mint", "market"),
             }
             mappings = {}
             for instruction in selected:
