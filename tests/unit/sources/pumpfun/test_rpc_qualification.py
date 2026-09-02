@@ -94,6 +94,36 @@ def test_pump_rpc_allowlist_and_endpoint_origin_never_expose_path_or_query() -> 
     assert transport.calls[0][0].endswith("secret-path?api=TOP_SECRET")
     assert "TOP_SECRET" not in str(result)
     with pytest.raises(PumpRpcMethodError, match="requires finalized read-only parameters"):
+        asyncio.run(provider.call("getTransaction", [SIGNATURE, {"commitment": "finalized", "encoding": "jsonParsed"}]))
+    transaction_provider = PumpRpcProvider("https://rpc.example.invalid", transport=FakeTransport([_response(1, {})]))
+    assert (
+        asyncio.run(
+            transaction_provider.call(
+                "getTransaction",
+                [
+                    SIGNATURE,
+                    {"commitment": "finalized", "encoding": "jsonParsed", "maxSupportedTransactionVersion": 0},
+                ],
+            )
+        ).result
+        == {}
+    )
+    for invalid_version in (False, 0.0, 1):
+        with pytest.raises(PumpRpcMethodError, match="requires finalized read-only parameters"):
+            asyncio.run(
+                provider.call(
+                    "getTransaction",
+                    [
+                        SIGNATURE,
+                        {
+                            "commitment": "finalized",
+                            "encoding": "jsonParsed",
+                            "maxSupportedTransactionVersion": invalid_version,
+                        },
+                    ],
+                )
+            )
+    with pytest.raises(PumpRpcMethodError, match="requires finalized read-only parameters"):
         asyncio.run(
             provider.call(
                 "getBlock", [100, {"commitment": "finalized", "encoding": "json", "transactionDetails": "full"}]
@@ -109,7 +139,7 @@ def test_pump_rpc_allowlist_and_endpoint_origin_never_expose_path_or_query() -> 
                         {
                             "commitment": "finalized",
                             "encoding": "json",
-                            "transactionDetails": "full",
+                            "transactionDetails": "signatures",
                             "maxSupportedTransactionVersion": invalid_version,
                         },
                     ],
@@ -125,7 +155,7 @@ def test_pump_rpc_allowlist_and_endpoint_origin_never_expose_path_or_query() -> 
                     {
                         "commitment": "finalized",
                         "encoding": "json",
-                        "transactionDetails": "full",
+                        "transactionDetails": "signatures",
                         "maxSupportedTransactionVersion": 0,
                     },
                 ],

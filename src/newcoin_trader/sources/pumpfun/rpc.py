@@ -27,6 +27,10 @@ class PumpRpcTransportError(PumpRpcError):
     pass
 
 
+class PumpRpcHistoryUnavailableError(PumpRpcError):
+    pass
+
+
 class PumpRpcQualificationCapError(PumpRpcError):
     pass
 
@@ -99,6 +103,8 @@ def _validate_method_params(method: str, params: Sequence[object]) -> None:
             and _finalized_config(params[1])
             and isinstance(params[1], Mapping)
             and params[1].get("encoding") == "jsonParsed"
+            and type(params[1].get("maxSupportedTransactionVersion")) is int
+            and params[1].get("maxSupportedTransactionVersion") == 0
         )
     elif method == "getBlock":
         valid = (
@@ -108,7 +114,7 @@ def _validate_method_params(method: str, params: Sequence[object]) -> None:
             and _finalized_config(params[1])
             and isinstance(params[1], Mapping)
             and params[1].get("encoding") == "json"
-            and params[1].get("transactionDetails") == "full"
+            and params[1].get("transactionDetails") == "signatures"
             and type(params[1].get("maxSupportedTransactionVersion")) is int
             and params[1].get("maxSupportedTransactionVersion") == 0
         )
@@ -173,7 +179,7 @@ class PumpRpcProvider:
             payload: dict[str, object] = {"jsonrpc": "2.0", "id": request_id, "method": method, "params": list(params)}
             try:
                 raw = await self._transport.post_json(self._endpoint, payload, timeout_seconds=self._timeout_seconds)
-                result, retryable_rpc, rpc_error = self._parse(request_id, raw)
+                result, retryable_rpc, rpc_error, rpc_error_code = self._parse(request_id, raw)
             except BaseException as error:
                 if attempt < self._max_attempts and _retryable_exception(error):
                     await self._sleep(0.25 * attempt)
@@ -185,6 +191,8 @@ class PumpRpcProvider:
                     continue
                 raise PumpRpcTransportError("Pump RPC retry exhausted")
             if rpc_error:
+                if rpc_error_code == -32004:
+                    raise PumpRpcHistoryUnavailableError("Pump RPC history unavailable")
                 raise PumpRpcTransportError("Pump RPC response error")
             return PumpRpcCallResult(
                 method=method, provider_origin=self.provider_origin, attempt_count=attempt, result=result
@@ -192,7 +200,7 @@ class PumpRpcProvider:
         raise PumpRpcTransportError("Pump RPC retry exhausted")
 
     @staticmethod
-    def _parse(request_id: int, raw: object) -> tuple[object, bool, bool]:
+    def _parse(request_id: int, raw: object) -> tuple[object, bool, bool, int | None]:
         if not isinstance(raw, Mapping) or raw.get("jsonrpc") != "2.0" or type(raw.get("id")) is not int:
             raise PumpRpcTransportError("malformed Pump RPC response")
         if raw["id"] != request_id or ("result" in raw) == ("error" in raw):
@@ -201,8 +209,8 @@ class PumpRpcProvider:
             error = raw["error"]
             if not isinstance(error, Mapping) or type(error.get("code")) is not int:
                 raise PumpRpcTransportError("malformed Pump RPC response")
-            return None, error["code"] in {-32005, -32004}, True
-        return raw["result"], False, False
+            return None, error["code"] in {-32005}, True, error["code"]
+        return raw["result"], False, False, None
 
 
 __all__ = [
