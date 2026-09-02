@@ -844,12 +844,22 @@ def write_pump_corpus_v2_source_manifest(
     return _create_only_json(manifest_path, manifest.model_dump(mode="json"))
 
 
-def recover_pump_corpus_v2_source_manifest(root: Path) -> tuple[PumpCorpusV2WindowPlan, PumpCorpusV2SourceManifest]:
-    """Fresh-process recovery boundary; only durable JSON may supply V2 windows/coordinates."""
+def recover_pump_corpus_v2_window_plan(root: Path) -> PumpCorpusV2WindowPlan:
+    """Recover only the immutable V2 window plan before source enumeration begins."""
     try:
         plan = PumpCorpusV2WindowPlan.model_validate(
             json.loads((root / _CORPUS_V2_PLAN_FILE).read_text(encoding="utf-8")), context=_FACTORY
         )
+    except (OSError, json.JSONDecodeError) as error:
+        raise ValueError("durable corpus V2 window plan is unreadable") from error
+    plan._factory_digest = plan.plan_digest
+    return plan
+
+
+def recover_pump_corpus_v2_source_manifest(root: Path) -> tuple[PumpCorpusV2WindowPlan, PumpCorpusV2SourceManifest]:
+    """Fresh-process recovery boundary; only durable JSON may supply V2 windows/coordinates."""
+    try:
+        plan = recover_pump_corpus_v2_window_plan(root)
         manifest = PumpCorpusV2SourceManifest.model_validate(
             json.loads((root / _CORPUS_V2_MANIFEST_FILE).read_text(encoding="utf-8")), context=_FACTORY
         )
@@ -874,6 +884,7 @@ __all__ = [
     "PumpCorpusV2SourceManifest",
     "PumpCorpusV2WindowPlan",
     "recover_pump_corpus_v2_source_manifest",
+    "recover_pump_corpus_v2_window_plan",
     "sanitize_helius_endpoint",
     "write_pump_corpus_v2_source_manifest",
     "write_pump_corpus_v2_window_plan",

@@ -16,6 +16,7 @@ from newcoin_trader.sources.pumpfun.helius_indexed import (
     IndexedPumpCandidateClaim,
     PumpCorpusV2WindowPlan,
     recover_pump_corpus_v2_source_manifest,
+    recover_pump_corpus_v2_window_plan,
     write_pump_corpus_v2_source_manifest,
     write_pump_corpus_v2_window_plan,
 )
@@ -131,6 +132,7 @@ def test_corpus_v2_freeze_persists_mint_free_source_coordinates_for_fresh_recove
     )
 
     plan_path = write_pump_corpus_v2_window_plan(tmp_path, plan=plan)
+    assert recover_pump_corpus_v2_window_plan(tmp_path).plan_digest == plan.plan_digest
     manifest_path = write_pump_corpus_v2_source_manifest(tmp_path, plan=plan, discoveries=(result,))
     recovered_plan, recovered = recover_pump_corpus_v2_source_manifest(tmp_path)
     fresh = subprocess.run(
