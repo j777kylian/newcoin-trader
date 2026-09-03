@@ -88,9 +88,15 @@ def extract_pump_trade_events(meta: Mapping[str, Any]) -> tuple[PumpTradeEventFa
             payload_hex = _instruction_data_hex(instruction.get("data"))
             if payload_hex is None or not payload_hex.startswith(TRADE_EVENT_DISCRIMINATOR):
                 continue
-            facts.append(
-                PumpTradeEventFact.from_payload(inner_instruction_index=position, payload=bytes.fromhex(payload_hex))
-            )
+            try:
+                facts.append(
+                    PumpTradeEventFact.from_payload(
+                        inner_instruction_index=position, payload=bytes.fromhex(payload_hex)
+                    )
+                )
+            except ValueError:
+                # Version-tail or malformed payloads fail closed per event, not per transaction.
+                continue
     return tuple(facts)
 
 

@@ -88,5 +88,26 @@ def test_extract_events_skips_non_pump_and_non_trade_instructions() -> None:
     assert events[0].is_buy is False
 
 
+def test_extract_events_skips_malformed_trade_event_payload() -> None:
+    truncated = _payload(sol=5, token=5, is_buy=True)[:50].hex()
+    meta = {
+        "innerInstructions": [
+            {
+                "index": 0,
+                "instructions": [
+                    {"programId": "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P", "data": truncated},
+                    {
+                        "programId": "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P",
+                        "data": _payload(sol=7, token=9, is_buy=False).hex(),
+                    },
+                ],
+            }
+        ]
+    }
+    events = extract_pump_trade_events(meta)
+    assert len(events) == 1
+    assert events[0].sol_lamports == 7
+
+
 def test_extract_events_handles_missing_meta() -> None:
     assert extract_pump_trade_events({}) == ()
