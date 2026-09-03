@@ -93,6 +93,26 @@ def test_collector_binds_trade_event_sol_and_instruction_roles() -> None:
     assert json.dumps(trades)
 
 
+def test_collector_skips_trade_without_bound_event_for_that_instruction() -> None:
+    # Two buy instructions but the TradeEvent group is bound to outer index 1 only.
+    tx = _tx(SIG_BUY, _BUY_DATA, _trade_event_payload(9_442_556, 59_495_627_565_763, True))
+    second = {
+        "programId": "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P",
+        "data": _BUY_DATA,
+        "accounts": [PAYER, CURVE, MINT, CURVE],
+    }
+    tx["transaction"]["message"]["instructions"] = [second, tx["transaction"]["message"]["instructions"][0]]  # type: ignore[index]
+    tx["meta"]["innerInstructions"][0]["index"] = 1  # type: ignore[index]
+    trades = PumpCurveTradeCollector._decode_transaction(
+        self=None,
+        signature=SIG_BUY,
+        slot=99,
+        response=tx,  # type: ignore[arg-type]
+    )
+    assert len(trades) == 1
+    assert trades[0]["trade_event"]["sol_lamports"] == 9_442_556
+
+
 def test_collector_skips_failed_transactions() -> None:
     transport = _FakeTransport(
         [

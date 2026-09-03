@@ -83,9 +83,9 @@ def test_extract_events_skips_non_pump_and_non_trade_instructions() -> None:
     }
     events = extract_pump_trade_events(meta)
     assert len(events) == 1
-    assert events[0].sol_lamports == 7
-    assert events[0].token_amount == 9
-    assert events[0].is_buy is False
+    assert events[0][1].sol_lamports == 7
+    assert events[0][1].token_amount == 9
+    assert events[0][1].is_buy is False
 
 
 def test_extract_events_skips_malformed_trade_event_payload() -> None:
@@ -106,7 +106,31 @@ def test_extract_events_skips_malformed_trade_event_payload() -> None:
     }
     events = extract_pump_trade_events(meta)
     assert len(events) == 1
-    assert events[0].sol_lamports == 7
+    assert events[0][1].sol_lamports == 7
+
+
+def test_extract_events_binds_outer_instruction_index() -> None:
+    meta = {
+        "innerInstructions": [
+            {
+                "index": 1,
+                "instructions": [
+                    {
+                        "programId": "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P",
+                        "data": _payload(sol=7, token=9, is_buy=False).hex(),
+                    },
+                ],
+            }
+        ]
+    }
+    events = extract_pump_trade_events(meta)
+    assert len(events) == 1
+    assert events[0][0] == 1
+    meta["innerInstructions"][0]["index"] = 0  # type: ignore[index]
+    events = extract_pump_trade_events(meta)
+    assert len(events) == 1
+    assert events[0][0] == 0
+    assert events[0][1].sol_lamports == 7
 
 
 def test_extract_events_handles_missing_meta() -> None:

@@ -70,14 +70,22 @@ class PumpTradeEventFact(BaseModel):
         )
 
 
-def extract_pump_trade_events(meta: Mapping[str, Any]) -> tuple[PumpTradeEventFact, ...]:
-    """Extract TradeEvent facts from finalized getTransaction meta inner instructions."""
-    facts: list[PumpTradeEventFact] = []
+def extract_pump_trade_events(meta: Mapping[str, Any]) -> tuple[tuple[int, PumpTradeEventFact], ...]:
+    """Extract (outer instruction index, TradeEvent) pairs from finalized getTransaction meta.
+
+    Each inner-instruction group carries the ``index`` of the outer instruction it
+    belongs to, so a multi-trade transaction binds each TradeEvent to its own
+    outer buy/sell instruction rather than reusing the first event.
+    """
+    facts: list[tuple[int, PumpTradeEventFact]] = []
     inner_instructions = meta.get("innerInstructions", ())
     if not isinstance(inner_instructions, list):
         return ()
     for group in inner_instructions:
         if not isinstance(group, Mapping):
+            continue
+        outer_index = group.get("index")
+        if isinstance(outer_index, bool) or not isinstance(outer_index, int) or outer_index < 0:
             continue
         instructions = group.get("instructions", ())
         if not isinstance(instructions, list):
@@ -90,8 +98,11 @@ def extract_pump_trade_events(meta: Mapping[str, Any]) -> tuple[PumpTradeEventFa
                 continue
             try:
                 facts.append(
-                    PumpTradeEventFact.from_payload(
-                        inner_instruction_index=position, payload=bytes.fromhex(payload_hex)
+                    (
+                        outer_index,
+                        PumpTradeEventFact.from_payload(
+                            inner_instruction_index=position, payload=bytes.fromhex(payload_hex)
+                        ),
                     )
                 )
             except ValueError:

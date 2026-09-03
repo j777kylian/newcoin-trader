@@ -73,11 +73,11 @@ class PumpCurveTradeCollector:
     def _decode_transaction(self, *, signature: str, slot: int, response: dict[str, Any]) -> list[dict[str, Any]]:
         message = response.get("transaction", {}).get("message", {})
         meta = response.get("meta", {})
-        events = extract_pump_trade_events(meta)
+        events = dict(extract_pump_trade_events(meta))
         if not events:
             return []
         trades: list[dict[str, Any]] = []
-        for instruction in message.get("instructions", []):
+        for instruction_index, instruction in enumerate(message.get("instructions", [])):
             if instruction.get("programId") != PUMP_PROGRAM_ADDRESS:
                 continue
             hexdata = _instruction_data_hex(instruction.get("data"))
@@ -88,6 +88,10 @@ class PumpCurveTradeCollector:
             elif hexdata.startswith(SELL_DISCRIMINATOR):
                 side = "sell"
             else:
+                continue
+            event = events.get(instruction_index)
+            if event is None:
+                # No TradeEvent bound to this outer instruction: fail closed, never reuse another's.
                 continue
             token_amount = decode_pump_trade_amount(hexdata)
             if token_amount is None:
@@ -103,7 +107,7 @@ class PumpCurveTradeCollector:
                     "mint": accounts[2],
                     "bonding_curve": accounts[3],
                     "instruction_token_amount": token_amount,
-                    "trade_event": events[0].model_dump(),
+                    "trade_event": event.model_dump(),
                 }
             )
         return trades
